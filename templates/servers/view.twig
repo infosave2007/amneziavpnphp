@@ -23,7 +23,10 @@
     <div class="bg-white rounded shadow p-6">
       <h3 class="font-bold mb-4">{{ t('clients.create') }}</h3>
       <form method="POST" action="/servers/{{ server.id }}/clients/create" class="space-y-3" id="createClientForm">
-        <input name="name" placeholder="{{ t('clients.name') }}" required class="w-full px-3 py-2 border rounded" id="clientName">
+        <div>
+          <input name="name" placeholder="{{ t('clients.name') }}" required class="w-full px-3 py-2 border rounded" id="clientName" pattern="[a-zA-Z0-9_-]+" title="Only letters, numbers, underscore and dash allowed">
+          <p class="text-xs text-gray-500 mt-1">Spaces and special characters will be replaced with underscore</p>
+        </div>
         <div>
           <label class="block text-sm text-gray-600 mb-1">{{ t('clients.expiration') }}</label>
           <select name="expires_in_days" class="w-full px-3 py-2 border rounded mb-2" id="expirationSelect" onchange="toggleExpirationInput()">
@@ -224,6 +227,20 @@ function toggleTrafficInput() {
 
 document.addEventListener('DOMContentLoaded', function() {
   const form = document.getElementById('createClientForm');
+  const clientNameInput = document.getElementById('clientName');
+  
+  // Auto-sanitize client name on input
+  if (clientNameInput) {
+    clientNameInput.addEventListener('input', function(e) {
+      // Replace spaces and special characters with underscore
+      let value = e.target.value;
+      let sanitized = value.replace(/[^a-zA-Z0-9_-]/g, '_');
+      if (value !== sanitized) {
+        e.target.value = sanitized;
+      }
+    });
+  }
+  
   if (form) {
     form.addEventListener('submit', function(e) {
       const btn = document.getElementById('createClientBtn');
