@@ -139,7 +139,7 @@ EOF
         FILENAME=$(basename "$migration")
         
         # Check if already applied
-        ALREADY_APPLIED=$($DOCKER_COMPOSE exec -T db mysql -uroot -p$DB_ROOT_PASS amnezia_panel -sN <<EOF 2>/dev/null || echo "0"
+        ALREADY_APPLIED=$($DOCKER_COMPOSE exec -T db mysql -uroot -p$DB_ROOT_PASS amnezia_panel -sN 2>/dev/null <<EOF || echo "0"
 SELECT COUNT(*) FROM schema_migrations WHERE filename = '$FILENAME';
 EOF
 )
