@@ -134,5 +134,15 @@ INSERT INTO translations (language_code, translation_key, translation_value) VAL
 ('fr', 'users.delete_confirm', 'Supprimer {0} ?'),
 ('fr', 'users.role', 'Rôle'),
 ('fr', 'users.role_admin', 'Administrateur'),
-('fr', 'users.role_user', 'Utilisateur')
+('fr', 'users.role_user', 'Utilisateur'),
+('fr', 'servers.import_from_panel', 'Importer depuis un panel existant'),
+('fr', 'servers.select_panel_type', 'Sélectionnez le type de panel'),
+('fr', 'servers.panel_type_wgeasy', 'wg-easy'),
+('fr', 'servers.panel_type_3xui', '3x-ui'),
+('fr', 'servers.upload_backup_file', 'Télécharger le fichier de sauvegarde (JSON)'),
+('fr', 'servers.import_in_progress', 'Importation en cours...'),
+('fr', 'servers.import_success', '{0} clients importés avec succès'),
+('fr', 'servers.import_failed', 'Échec de l''importation'),
+('fr', 'servers.import_partial', '{0} clients importés sur {1}'),
+('fr', 'servers.import_history', 'Historique d''importation')
 ON DUPLICATE KEY UPDATE translation_value=VALUES(translation_value);

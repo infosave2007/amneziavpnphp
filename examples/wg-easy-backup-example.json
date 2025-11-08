@@ -1,0 +1,29 @@
+{
+  "clients": [
+    {
+      "name": "John Doe Phone",
+      "enabled": true,
+      "address": "10.8.1.2",
+      "publicKey": "qwerty123456789abcdefghijklmnopqrstuvwxyz=",
+      "privateKey": "privatekey123456789abcdefghijklmnopqrstuvwxyz=",
+      "preSharedKey": "presharedkey123456789abcdefghijklmnopqrstuvwxyz=",
+      "createdAt": "2024-01-15T10:30:00.000Z"
+    },
+    {
+      "name": "Jane Smith Laptop",
+      "enabled": true,
+      "address": "10.8.1.3",
+      "publicKey": "asdfgh987654321zyxwvutsrqponmlkjihgfedcba=",
+      "privateKey": "privatekey987654321zyxwvutsrqponmlkjihgfedcba=",
+      "preSharedKey": "presharedkey987654321zyxwvutsrqponmlkjihgfedcba=",
+      "createdAt": "2024-02-20T15:45:00.000Z"
+    },
+    {
+      "name": "Bob Office PC",
+      "enabled": false,
+      "address": "10.8.1.4",
+      "publicKey": "zxcvbn111222333444555666777888999000aaabbb=",
+      "createdAt": "2024-03-10T08:20:00.000Z"
+    }
+  ]
+}

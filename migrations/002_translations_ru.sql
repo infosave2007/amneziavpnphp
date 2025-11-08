@@ -134,5 +134,15 @@ INSERT INTO translations (language_code, translation_key, translation_value) VAL
 ('ru', 'users.delete_confirm', 'Удалить {0}?'),
 ('ru', 'users.role', 'Роль'),
 ('ru', 'users.role_admin', 'Администратор'),
-('ru', 'users.role_user', 'Пользователь')
+('ru', 'users.role_user', 'Пользователь'),
+('ru', 'servers.import_from_panel', 'Импорт из другой панели'),
+('ru', 'servers.select_panel_type', 'Выберите тип панели'),
+('ru', 'servers.panel_type_wgeasy', 'wg-easy'),
+('ru', 'servers.panel_type_3xui', '3x-ui'),
+('ru', 'servers.upload_backup_file', 'Загрузите файл резервной копии (JSON)'),
+('ru', 'servers.import_in_progress', 'Импорт выполняется...'),
+('ru', 'servers.import_success', 'Успешно импортировано клиентов: {0}'),
+('ru', 'servers.import_failed', 'Ошибка импорта'),
+('ru', 'servers.import_partial', 'Импортировано {0} из {1} клиентов'),
+('ru', 'servers.import_history', 'История импорта')
 ON DUPLICATE KEY UPDATE translation_value=VALUES(translation_value);

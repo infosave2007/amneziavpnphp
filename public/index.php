@@ -18,6 +18,7 @@ require_once __DIR__ . '/../inc/VpnServer.php';
 require_once __DIR__ . '/../inc/VpnClient.php';
 require_once __DIR__ . '/../inc/Translator.php';
 require_once __DIR__ . '/../inc/JWT.php';
+require_once __DIR__ . '/../inc/PanelImporter.php';
 
 // Load environment configuration
 Config::load(__DIR__ . '/../.env');
@@ -252,6 +253,21 @@ Router::post('/servers/create', function () {
             'password' => $password,
         ]);
         
+        // Handle import if enabled
+        if (!empty($_POST['enable_import']) && !empty($_POST['panel_type']) && isset($_FILES['backup_file'])) {
+            $panelType = $_POST['panel_type'];
+            
+            if (in_array($panelType, ['wg-easy', '3x-ui']) && $_FILES['backup_file']['error'] === UPLOAD_ERR_OK) {
+                // Store import info in session for processing after deployment
+                $_SESSION['pending_import'] = [
+                    'server_id' => $serverId,
+                    'panel_type' => $panelType,
+                    'backup_file' => $_FILES['backup_file']['tmp_name'],
+                    'backup_name' => $_FILES['backup_file']['name']
+                ];
+            }
+        }
+        
         redirect('/servers/' . $serverId . '/deploy');
     } catch (Exception $e) {
         View::render('servers/create.twig', ['error' => $e->getMessage()]);
@@ -355,9 +371,48 @@ Router::get('/servers/{id}', function ($params) {
         // Get clients for this server
         $clients = VpnClient::listByServer($serverId);
         
+        // Check for pending import
+        $importMessage = null;
+        if (!empty($_SESSION['pending_import']) && $_SESSION['pending_import']['server_id'] == $serverId) {
+            $pendingImport = $_SESSION['pending_import'];
+            
+            // Only process import if server is active
+            if ($serverData['status'] === 'active') {
+                try {
+                    $backupContent = file_get_contents($pendingImport['backup_file']);
+                    
+                    $importer = new PanelImporter($serverId, $user['id'], $pendingImport['panel_type']);
+                    $importer->parseBackupFile($backupContent);
+                    $result = $importer->import();
+                    
+                    if ($result['success']) {
+                        $importMessage = [
+                            'type' => 'success',
+                            'text' => "Successfully imported {$result['imported_count']} clients"
+                        ];
+                    }
+                    
+                    // Clean up
+                    @unlink($pendingImport['backup_file']);
+                    unset($_SESSION['pending_import']);
+                    
+                } catch (Exception $e) {
+                    $importMessage = [
+                        'type' => 'error',
+                        'text' => 'Import failed: ' . $e->getMessage()
+                    ];
+                    unset($_SESSION['pending_import']);
+                }
+                
+                // Refresh clients list after import
+                $clients = VpnClient::listByServer($serverId);
+            }
+        }
+        
         View::render('servers/view.twig', [
             'server' => $serverData,
             'clients' => $clients,
+            'import_message' => $importMessage,
         ]);
     } catch (Exception $e) {
         error_log('Server view error: ' . $e->getMessage() . ' at ' . $e->getFile() . ':' . $e->getLine());
@@ -802,6 +857,87 @@ Router::delete('/api/servers/{id}/delete', function ($params) {
     header('Content-Type: application/json');
     
     $user = JWT::requireAuth();
+
+// API: Import from existing panel
+Router::post('/api/servers/{id}/import', function ($params) {
+    header('Content-Type: application/json');
+    
+    $user = JWT::requireAuth();
+    if (!$user) return;
+    
+    $serverId = (int)$params['id'];
+    
+    // Validate server ownership
+    $server = VpnServer::getById($serverId);
+    if (!$server || $server['user_id'] != $user['id']) {
+        http_response_code(404);
+        echo json_encode(['error' => 'Server not found']);
+        return;
+    }
+    
+    $panelType = $_POST['panel_type'] ?? '';
+    
+    if (!in_array($panelType, ['wg-easy', '3x-ui'])) {
+        http_response_code(400);
+        echo json_encode(['error' => 'Invalid panel type. Supported: wg-easy, 3x-ui']);
+        return;
+    }
+    
+    // Handle file upload
+    if (!isset($_FILES['backup_file']) || $_FILES['backup_file']['error'] !== UPLOAD_ERR_OK) {
+        http_response_code(400);
+        echo json_encode(['error' => 'No backup file uploaded']);
+        return;
+    }
+    
+    $backupContent = file_get_contents($_FILES['backup_file']['tmp_name']);
+    
+    try {
+        $importer = new PanelImporter($serverId, $user['id'], $panelType);
+        
+        if (!$importer->parseBackupFile($backupContent)) {
+            http_response_code(400);
+            echo json_encode(['error' => 'Invalid backup file format']);
+            return;
+        }
+        
+        $result = $importer->import();
+        
+        echo json_encode($result);
+        
+    } catch (Exception $e) {
+        http_response_code(500);
+        echo json_encode([
+            'success' => false,
+            'error' => $e->getMessage()
+        ]);
+    }
+});
+
+// API: Get import history
+Router::get('/api/servers/{id}/imports', function ($params) {
+    header('Content-Type: application/json');
+    
+    $user = JWT::requireAuth();
+    if (!$user) return;
+    
+    $serverId = (int)$params['id'];
+    
+    // Validate server ownership
+    $server = VpnServer::getById($serverId);
+    if (!$server || $server['user_id'] != $user['id']) {
+        http_response_code(404);
+        echo json_encode(['error' => 'Server not found']);
+        return;
+    }
+    
+    $imports = PanelImporter::getImportHistory($serverId);
+    
+    echo json_encode([
+        'success' => true,
+        'imports' => $imports
+    ]);
+});
     if (!$user) return;
     
     $serverId = (int)$params['id'];

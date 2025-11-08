@@ -307,5 +307,15 @@ INSERT INTO translations (language_code, translation_key, translation_value) VAL
 ('en', 'users.role_user', 'User'),
 ('en', 'settings.api_key_configured', 'API Key Configured'),
 ('en', 'settings.no_api_key', 'No API key configured. Auto-translation will not work.'),
-('en', 'settings.skip_validation', 'Skip validation (save without testing)')
+('en', 'settings.skip_validation', 'Skip validation (save without testing)'),
+('en', 'servers.import_from_panel', 'Import from existing panel'),
+('en', 'servers.select_panel_type', 'Select panel type'),
+('en', 'servers.panel_type_wgeasy', 'wg-easy'),
+('en', 'servers.panel_type_3xui', '3x-ui'),
+('en', 'servers.upload_backup_file', 'Upload backup file (JSON)'),
+('en', 'servers.import_in_progress', 'Import in progress...'),
+('en', 'servers.import_success', 'Successfully imported {0} clients'),
+('en', 'servers.import_failed', 'Import failed'),
+('en', 'servers.import_partial', 'Imported {0} of {1} clients'),
+('en', 'servers.import_history', 'Import History')
 ON DUPLICATE KEY UPDATE translation_value=VALUES(translation_value);

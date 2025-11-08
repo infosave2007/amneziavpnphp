@@ -5,6 +5,7 @@ Web-based management panel for Amnezia AWG (WireGuard) VPN servers.
 ## Features
 
 - VPN server deployment via SSH
+- **Import from existing VPN panels** (wg-easy, 3x-ui)
 - Client configuration management with **expiration dates**
 - **Traffic limits** for clients with automatic enforcement
 - **Server backup and restore** functionality
@@ -57,8 +58,13 @@ JWT_SECRET=your-secret-key-change-this
 
 1. Servers → Add Server
 2. Enter: name, host IP, SSH port, username, password
-3. Click Deploy Server
-4. Wait for deployment
+3. **(Optional) Enable import from existing panel:**
+   - Check "Import from existing panel"
+   - Select panel type (wg-easy or 3x-ui)
+   - Upload backup file (JSON)
+4. Click "Create Server"
+5. Wait for deployment
+6. Clients will be imported automatically if import was enabled
 
 ### Create Client
 
@@ -221,6 +227,13 @@ POST   /api/servers/{id}/restore    - Restore from backup
 DELETE /api/backups/{id}             - Delete backup
 ```
 
+### Panel Import
+```
+POST   /api/servers/{id}/import     - Import clients from existing panel
+       Parameters: panel_type (wg-easy|3x-ui), backup_file (multipart/form-data)
+GET    /api/servers/{id}/imports    - Get import history for server
+```
+
 ## Translation
 
 Add OpenRouter API key in Settings, then run:
@@ -244,6 +257,7 @@ inc/                  - Core classes
   Translator.php     - Multi-language
   JWT.php            - Token auth
   QrUtil.php         - QR code generation
+  PanelImporter.php  - Import from wg-easy/3x-ui
 templates/           - Twig templates
 migrations/          - SQL migrations (executed in alphabetical order)
 ```

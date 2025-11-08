@@ -134,5 +134,15 @@ INSERT INTO translations (language_code, translation_key, translation_value) VAL
 ('zh', 'users.delete_confirm', '删除 {0}？'),
 ('zh', 'users.role', '角色'),
 ('zh', 'users.role_admin', '管理员'),
-('zh', 'users.role_user', '用户')
+('zh', 'users.role_user', '用户'),
+('zh', 'servers.import_from_panel', '从现有面板导入'),
+('zh', 'servers.select_panel_type', '选择面板类型'),
+('zh', 'servers.panel_type_wgeasy', 'wg-easy'),
+('zh', 'servers.panel_type_3xui', '3x-ui'),
+('zh', 'servers.upload_backup_file', '上传备份文件 (JSON)'),
+('zh', 'servers.import_in_progress', '导入进行中...'),
+('zh', 'servers.import_success', '成功导入 {0} 个客户端'),
+('zh', 'servers.import_failed', '导入失败'),
+('zh', 'servers.import_partial', '已导入 {0}/{1} 个客户端'),
+('zh', 'servers.import_history', '导入历史')
 ON DUPLICATE KEY UPDATE translation_value=VALUES(translation_value);

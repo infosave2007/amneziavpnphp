@@ -1,0 +1,36 @@
+{
+  "clients": [
+    {
+      "id": 1,
+      "email": "user1@example.com",
+      "enable": true,
+      "expiryTime": 0,
+      "totalGB": 50,
+      "up": 1073741824,
+      "down": 5368709120
+    },
+    {
+      "id": 2,
+      "email": "user2@example.com",
+      "enable": true,
+      "expiryTime": 1735689600000,
+      "totalGB": 100,
+      "up": 536870912,
+      "down": 2147483648
+    },
+    {
+      "id": 3,
+      "email": "user3@example.com",
+      "enable": false,
+      "expiryTime": 0,
+      "totalGB": 0,
+      "up": 0,
+      "down": 0
+    }
+  ],
+  "settings": {
+    "port": 51820,
+    "interface": "wg0",
+    "mtu": 1420
+  }
+}

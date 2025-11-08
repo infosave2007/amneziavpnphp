@@ -4,13 +4,54 @@
 <div class="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8">
   <h1 class="text-3xl font-bold mb-8"><i class="fas fa-plus-circle text-purple-600"></i> Add New Server</h1>
   {% if error %}<div class="mb-4 bg-red-50 border border-red-400 text-red-700 px-4 py-3 rounded">{{ error }}</div>{% endif %}
-  <form method="POST" class="bg-white shadow rounded-lg p-6 space-y-6">
+  <form method="POST" enctype="multipart/form-data" class="bg-white shadow rounded-lg p-6 space-y-6">
     <div><label class="block text-sm font-medium text-gray-700">Server Name</label><input name="name" required class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md" placeholder="US Server 1"></div>
     <div><label class="block text-sm font-medium text-gray-700">Host IP/Domain</label><input name="host" required class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md" placeholder="123.456.789.0"></div>
     <div><label class="block text-sm font-medium text-gray-700">SSH Port</label><input name="port" type="number" value="22" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md"></div>
     <div><label class="block text-sm font-medium text-gray-700">SSH Username</label><input name="username" value="root" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md"></div>
     <div><label class="block text-sm font-medium text-gray-700">SSH Password</label><input name="password" type="password" required class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md"></div>
-    <button type="submit" class="w-full gradient-bg text-white py-2 px-4 rounded-md hover:opacity-90"><i class="fas fa-save mr-2"></i>Create Server</button>
+    
+    <!-- Import from existing panel -->
+    <div class="border-t pt-6">
+      <div class="flex items-center mb-4">
+        <input type="checkbox" id="enableImport" name="enable_import" class="h-4 w-4 text-purple-600 rounded" onchange="toggleImportFields()">
+        <label for="enableImport" class="ml-2 text-sm font-medium text-gray-700">
+          {{ t('servers.import_from_panel') }}
+        </label>
+      </div>
+      
+      <div id="importFields" style="display: none;" class="space-y-4 pl-6 border-l-2 border-purple-200">
+        <div>
+          <label class="block text-sm font-medium text-gray-700">{{ t('servers.select_panel_type') }}</label>
+          <select name="panel_type" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+            <option value="">-- {{ t('servers.select_panel_type') }} --</option>
+            <option value="wg-easy">{{ t('servers.panel_type_wgeasy') }}</option>
+            <option value="3x-ui">{{ t('servers.panel_type_3xui') }}</option>
+          </select>
+        </div>
+        
+        <div>
+          <label class="block text-sm font-medium text-gray-700">{{ t('servers.upload_backup_file') }}</label>
+          <input type="file" name="backup_file" accept=".json" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+          <p class="mt-1 text-xs text-gray-500">
+            wg-easy: db.json | 3x-ui: export.json
+          </p>
+        </div>
+      </div>
+    </div>
+    
+    <button type="submit" class="w-full gradient-bg text-white py-2 px-4 rounded-md hover:opacity-90">
+      <i class="fas fa-save mr-2"></i>Create Server
+    </button>
   </form>
 </div>
+
+<script>
+function toggleImportFields() {
+  const checkbox = document.getElementById('enableImport');
+  const fields = document.getElementById('importFields');
+  fields.style.display = checkbox.checked ? 'block' : 'none';
+}
+</script>
+
 {% endblock %}
