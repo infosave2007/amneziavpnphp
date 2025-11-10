@@ -1,0 +1,181 @@
+{% extends "layout.twig" %}
+
+{% block title %}{{ t('ldap.settings') }}{% endblock %}
+
+{% block content %}
+<div class="max-w-4xl mx-auto">
+    <div class="bg-white rounded-lg shadow-md p-6 mb-6">
+        <div class="flex items-center justify-between mb-6">
+            <h2 class="text-2xl font-bold text-gray-800">{{ t('ldap.settings') }}</h2>
+            <button id="testConnection" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">
+                {{ t('ldap.test_connection') }}
+            </button>
+        </div>
+
+        <form id="ldapForm" method="POST" action="/settings/ldap/save">
+            <div class="mb-6 p-4 bg-gray-50 rounded-lg">
+                <label class="flex items-center cursor-pointer">
+                    <input type="checkbox" name="enabled" value="1" 
+                           {% if config.enabled %}checked{% endif %}
+                           class="w-5 h-5 text-blue-600 rounded focus:ring-2 focus:ring-blue-500">
+                    <span class="ml-3 text-lg font-medium text-gray-900">{{ t('ldap.enable_ldap_auth') }}</span>
+                </label>
+                <p class="mt-2 ml-8 text-sm text-gray-600">{{ t('ldap.enable_description') }}</p>
+            </div>
+
+            <div class="space-y-4">
+                <div class="grid grid-cols-2 gap-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">
+                            {{ t('ldap.host') }} <span class="text-red-500">*</span>
+                        </label>
+                        <input type="text" name="host" value="{{ config.host }}" required
+                               placeholder="ldap.example.com"
+                               class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-700 mb-1">
+                            {{ t('ldap.port') }}
+                        </label>
+                        <input type="number" name="port" value="{{ config.port }}" 
+                               placeholder="389"
+                               class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+                    </div>
+                </div>
+
+                <div>
+                    <label class="flex items-center cursor-pointer">
+                        <input type="checkbox" name="use_tls" value="1"
+                               {% if config.use_tls %}checked{% endif %}
+                               class="w-4 h-4 text-blue-600 rounded focus:ring-2 focus:ring-blue-500">
+                        <span class="ml-2 text-sm text-gray-700">{{ t('ldap.use_tls') }} (LDAPS)</span>
+                    </label>
+                </div>
+
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">
+                        {{ t('ldap.base_dn') }} <span class="text-red-500">*</span>
+                    </label>
+                    <input type="text" name="base_dn" value="{{ config.base_dn }}" required
+                           placeholder="dc=example,dc=com"
+                           class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+                    <p class="mt-1 text-xs text-gray-500">{{ t('ldap.base_dn_description') }}</p>
+                </div>
+
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">
+                        {{ t('ldap.bind_dn') }} <span class="text-red-500">*</span>
+                    </label>
+                    <input type="text" name="bind_dn" value="{{ config.bind_dn }}" required
+                           placeholder="cn=admin,dc=example,dc=com"
+                           class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+                    <p class="mt-1 text-xs text-gray-500">{{ t('ldap.bind_dn_description') }}</p>
+                </div>
+
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">
+                        {{ t('ldap.bind_password') }} <span class="text-red-500">*</span>
+                    </label>
+                    <input type="password" name="bind_password" value="{{ config.bind_password }}" required
+                           placeholder="••••••••"
+                           class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+                </div>
+
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">
+                        {{ t('ldap.user_search_filter') }}
+                    </label>
+                    <input type="text" name="user_search_filter" value="{{ config.user_search_filter }}"
+                           placeholder="(uid=%s)"
+                           class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+                    <p class="mt-1 text-xs text-gray-500">{{ t('ldap.user_search_filter_description') }}</p>
+                </div>
+
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">
+                        {{ t('ldap.group_search_filter') }}
+                    </label>
+                    <input type="text" name="group_search_filter" value="{{ config.group_search_filter }}"
+                           placeholder="(memberUid=%s)"
+                           class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+                </div>
+
+                <div>
+                    <label class="block text-sm font-medium text-gray-700 mb-1">
+                        {{ t('ldap.sync_interval') }}
+                    </label>
+                    <input type="number" name="sync_interval" value="{{ config.sync_interval }}"
+                           placeholder="30"
+                           class="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500">
+                    <p class="mt-1 text-xs text-gray-500">{{ t('ldap.sync_interval_description') }}</p>
+                </div>
+            </div>
+
+            <div class="mt-6 flex gap-4">
+                <button type="submit" class="px-6 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700">
+                    {{ t('common.save') }}
+                </button>
+                <a href="/settings" class="px-6 py-2 bg-gray-300 text-gray-700 rounded-lg hover:bg-gray-400">
+                    {{ t('common.cancel') }}
+                </a>
+            </div>
+        </form>
+    </div>
+
+    <div class="bg-white rounded-lg shadow-md p-6">
+        <h3 class="text-xl font-bold text-gray-800 mb-4">{{ t('ldap.group_mappings') }}</h3>
+        
+        <div class="overflow-x-auto">
+            <table class="min-w-full divide-y divide-gray-200">
+                <thead class="bg-gray-50">
+                    <tr>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">{{ t('ldap.group') }}</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">{{ t('ldap.role') }}</th>
+                        <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">{{ t('ldap.description') }}</th>
+                    </tr>
+                </thead>
+                <tbody class="bg-white divide-y divide-gray-200">
+                    {% for mapping in mappings %}
+                    <tr>
+                        <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900">{{ mapping.ldap_group }}</td>
+                        <td class="px-6 py-4 whitespace-nowrap">
+                            <span class="px-2 py-1 text-xs font-semibold rounded-full 
+                                {% if mapping.role_name == 'admin' %}bg-red-100 text-red-800
+                                {% elseif mapping.role_name == 'manager' %}bg-blue-100 text-blue-800
+                                {% else %}bg-gray-100 text-gray-800{% endif %}">
+                                {{ mapping.role_name }}
+                            </span>
+                        </td>
+                        <td class="px-6 py-4 text-sm text-gray-500">{{ mapping.description }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<script>
+document.getElementById('testConnection').addEventListener('click', async function() {
+    const btn = this;
+    btn.disabled = true;
+    btn.textContent = '{{ t('ldap.testing') }}...';
+    
+    try {
+        const response = await fetch('/settings/ldap/test', { method: 'POST' });
+        const result = await response.json();
+        
+        if (result.success) {
+            alert('✓ ' + result.message);
+        } else {
+            alert('✗ ' + result.message);
+        }
+    } catch (error) {
+        alert('{{ t('ldap.connection_test_failed') }}: ' + error.message);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '{{ t('ldap.test_connection') }}';
+    }
+});
+</script>
+{% endblock %}
