@@ -41,3 +41,4 @@ build/
 backup/
 backups/
 TEST_RESULTS.md
+LDAP_FEATURE.md
