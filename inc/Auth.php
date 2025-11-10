@@ -16,6 +16,35 @@ class Auth {
   public static function login(string $email, string $password): bool {
     $pdo = DB::conn();
     $email = strtolower(trim($email));
+    
+    // Try LDAP authentication first if enabled
+    $ldap = new LdapSync();
+    if ($ldap->isEnabled()) {
+      $ldapUser = $ldap->authenticate($email, $password);
+      if ($ldapUser) {
+        // LDAP auth successful - sync/create user in local DB
+        $stmt = $pdo->prepare('SELECT * FROM users WHERE ldap_dn = ? LIMIT 1');
+        $stmt->execute([$ldapUser['ldap_dn']]);
+        $user = $stmt->fetch();
+        
+        if (!$user) {
+          // Create new LDAP user
+          $stmt = $pdo->prepare('INSERT INTO users (email, password_hash, name, role, status, ldap_synced, ldap_dn) VALUES (?, \'\', ?, ?, \'active\', 1, ?)');
+          $stmt->execute([$ldapUser['email'], $ldapUser['display_name'], $ldapUser['role'], $ldapUser['ldap_dn']]);
+          $userId = (int)$pdo->lastInsertId();
+        } else {
+          $userId = (int)$user['id'];
+          // Update user info from LDAP
+          $stmt = $pdo->prepare('UPDATE users SET email = ?, name = ?, role = ?, status = \'active\', last_login_at = NOW() WHERE id = ?');
+          $stmt->execute([$ldapUser['email'], $ldapUser['display_name'], $ldapUser['role'], $userId]);
+        }
+        
+        $_SESSION['user_id'] = $userId;
+        return true;
+      }
+    }
+    
+    // Fallback to local DB authentication
     $stmt = $pdo->prepare('SELECT * FROM users WHERE email = ? LIMIT 1');
     $stmt->execute([$email]);
     $user = $stmt->fetch();

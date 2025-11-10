@@ -325,4 +325,136 @@ class SettingsController {
         
         return $stats;
     }
+    
+    public function ldapSettings() {
+        $user = Auth::user();
+        if ($user['role'] !== 'admin') {
+            http_response_code(403);
+            echo 'Forbidden';
+            return;
+        }
+        
+        // Get LDAP configuration
+        $stmt = $this->pdo->query("SELECT * FROM ldap_configs WHERE id = 1");
+        $config = $stmt->fetch() ?: [];
+        
+        // Get group mappings
+        $stmt = $this->pdo->query("SELECT * FROM ldap_group_mappings ORDER BY ldap_group");
+        $mappings = $stmt->fetchAll();
+        
+        $data = [
+            'config' => $config,
+            'mappings' => $mappings
+        ];
+        
+        // Check for session messages
+        if (isset($_SESSION['settings_success'])) {
+            $data['success'] = $_SESSION['settings_success'];
+            unset($_SESSION['settings_success']);
+        }
+        if (isset($_SESSION['settings_error'])) {
+            $data['error'] = $_SESSION['settings_error'];
+            unset($_SESSION['settings_error']);
+        }
+        
+        View::render('settings/ldap.twig', $data);
+    }
+    
+    public function saveLdapSettings() {
+        if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+            header('Location: /settings/ldap');
+            exit;
+        }
+        
+        $user = Auth::user();
+        if ($user['role'] !== 'admin') {
+            http_response_code(403);
+            echo json_encode(['success' => false, 'message' => 'Forbidden']);
+            return;
+        }
+        
+        $enabled = isset($_POST['enabled']) ? 1 : 0;
+        $host = trim($_POST['host'] ?? '');
+        $port = intval($_POST['port'] ?? 389);
+        $useTls = isset($_POST['use_tls']) ? 1 : 0;
+        $baseDn = trim($_POST['base_dn'] ?? '');
+        $bindDn = trim($_POST['bind_dn'] ?? '');
+        $bindPassword = $_POST['bind_password'] ?? '';
+        $userSearchFilter = trim($_POST['user_search_filter'] ?? '(uid=%s)');
+        $groupSearchFilter = trim($_POST['group_search_filter'] ?? '(memberUid=%s)');
+        $syncInterval = intval($_POST['sync_interval'] ?? 30);
+        
+        if (empty($host) || empty($baseDn) || empty($bindDn)) {
+            $_SESSION['settings_error'] = 'Host, Base DN, and Bind DN are required';
+            header('Location: /settings/ldap');
+            exit;
+        }
+        
+        // Update or insert configuration
+        $stmt = $this->pdo->prepare("
+            INSERT INTO ldap_configs 
+            (id, enabled, host, port, use_tls, base_dn, bind_dn, bind_password, user_search_filter, group_search_filter, sync_interval)
+            VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON DUPLICATE KEY UPDATE
+            enabled = VALUES(enabled),
+            host = VALUES(host),
+            port = VALUES(port),
+            use_tls = VALUES(use_tls),
+            base_dn = VALUES(base_dn),
+            bind_dn = VALUES(bind_dn),
+            bind_password = VALUES(bind_password),
+            user_search_filter = VALUES(user_search_filter),
+            group_search_filter = VALUES(group_search_filter),
+            sync_interval = VALUES(sync_interval)
+        ");
+        
+        $stmt->execute([
+            $enabled,
+            $host,
+            $port,
+            $useTls,
+            $baseDn,
+            $bindDn,
+            $bindPassword,
+            $userSearchFilter,
+            $groupSearchFilter,
+            $syncInterval
+        ]);
+        
+        $_SESSION['settings_success'] = 'LDAP settings saved successfully';
+        header('Location: /settings/ldap');
+        exit;
+    }
+    
+    public function testLdapConnection() {
+        header('Content-Type: application/json');
+        
+        $user = Auth::user();
+        if ($user['role'] !== 'admin') {
+            http_response_code(403);
+            echo json_encode(['success' => false, 'message' => 'Forbidden']);
+            return;
+        }
+        
+        try {
+            $ldap = new LdapSync();
+            
+            if (!$ldap->isEnabled()) {
+                echo json_encode([
+                    'success' => false,
+                    'message' => 'LDAP is not enabled. Please save configuration first.'
+                ]);
+                return;
+            }
+            
+            $result = $ldap->testConnection();
+            echo json_encode($result);
+            
+        } catch (Exception $e) {
+            echo json_encode([
+                'success' => false,
+                'message' => 'Error: ' . $e->getMessage()
+            ]);
+        }
+    }
 }

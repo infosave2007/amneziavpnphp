@@ -1798,6 +1798,36 @@ Router::post('/settings/delete-user/{id}', function ($params) {
     $controller->deleteUser($params['id']);
 });
 
+// LDAP settings page
+Router::get('/settings/ldap', function () {
+    requireAdmin();
+    
+    require_once __DIR__ . '/../controllers/SettingsController.php';
+    require_once __DIR__ . '/../inc/LdapSync.php';
+    $controller = new SettingsController();
+    $controller->ldapSettings();
+});
+
+// Save LDAP settings
+Router::post('/settings/ldap/save', function () {
+    requireAdmin();
+    
+    require_once __DIR__ . '/../controllers/SettingsController.php';
+    require_once __DIR__ . '/../inc/LdapSync.php';
+    $controller = new SettingsController();
+    $controller->saveLdapSettings();
+});
+
+// Test LDAP connection
+Router::post('/settings/ldap/test', function () {
+    requireAdmin();
+    
+    require_once __DIR__ . '/../controllers/SettingsController.php';
+    require_once __DIR__ . '/../inc/LdapSync.php';
+    $controller = new SettingsController();
+    $controller->testLdapConnection();
+});
+
 /**
  * LANGUAGE ROUTES
  */
