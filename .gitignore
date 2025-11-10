@@ -40,3 +40,4 @@ build/
 *.bak
 backup/
 backups/
+TEST_RESULTS.md
