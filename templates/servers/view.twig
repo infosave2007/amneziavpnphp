@@ -453,7 +453,10 @@ document.addEventListener('DOMContentLoaded', function() {
   document.querySelectorAll('.btn-uninstall-sp').forEach(btn => {
     btn.addEventListener('click', async function(e) {
       e.preventDefault();
-      if (!confirm('Удалить протокол и всех его клиентов?')) return;
+      e.stopPropagation();
+      e.stopImmediatePropagation();
+      const confirmResult = confirm('Удалить протокол и всех его клиентов?');
+      if (!confirmResult) return;
       const slug = btn.getAttribute('data-slug');
       const m = document.getElementById('uninstallSpMsg');
       m.textContent = '';
