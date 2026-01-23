@@ -99,7 +99,7 @@
               <i class="fas fa-eye mr-1"></i>{{ t('servers.view') }}
             </a>
             <form method="POST" action="/servers/{{ server.id }}/delete" class="inline" id="delete-form-{{ server.id }}">
-              <button type="button" class="text-red-600 hover:text-red-900" onclick="event.stopPropagation(); if(confirm('{{ t('message.confirm') }} Delete server {{ server.name }}?')) { document.getElementById('delete-form-{{ server.id }}').submit(); }">
+              <button type="button" class="text-red-600 hover:text-red-900" onclick="(async()=>{ event.stopPropagation(); if(await showConfirmModal('Удалить сервер {{ server.name }}?', 'Удаление сервера')) { document.getElementById('delete-form-{{ server.id }}').submit(); } })()">
                 <i class="fas fa-trash mr-1"></i>{{ t('servers.delete') }}
               </button>
             </form>

@@ -135,6 +135,28 @@
     <main class="{% if user %}py-10{% endif %}">
         {% block content %}{% endblock %}
     </main>
+    <!-- Custom Confirmation Modal -->
+    <div id="confirmModal" class="fixed inset-0 bg-gray-600 bg-opacity-50 hidden overflow-y-auto h-full w-full z-[9999]" style="display:none;">
+        <div class="relative top-20 mx-auto p-5 border w-96 shadow-lg rounded-md bg-white">
+            <div class="mt-3 text-center">
+                <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-red-100">
+                    <i class="fas fa-exclamation-triangle text-red-600 text-xl"></i>
+                </div>
+                <h3 class="text-lg leading-6 font-medium text-gray-900 mt-4" id="confirmModalTitle">Подтверждение</h3>
+                <div class="mt-2 px-7 py-3">
+                    <p class="text-sm text-gray-500" id="confirmModalMessage">Вы уверены?</p>
+                </div>
+                <div class="items-center px-4 py-3 flex justify-center gap-4">
+                    <button id="confirmModalCancel" class="px-4 py-2 bg-gray-200 text-gray-800 text-base font-medium rounded-md shadow-sm hover:bg-gray-300 focus:outline-none focus:ring-2 focus:ring-gray-300">
+                        Отмена
+                    </button>
+                    <button id="confirmModalOk" class="px-4 py-2 bg-red-600 text-white text-base font-medium rounded-md shadow-sm hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500">
+                        Удалить
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
 
     <!-- Footer -->
     <footer class="bg-white border-t border-gray-200 mt-auto">
@@ -174,6 +196,58 @@
                 // Form will submit normally, dropdown will close on page reload
             }
         });
+
+        // Custom confirmation modal function (replaces native confirm)
+        window.showConfirmModal = function(message, title) {
+            return new Promise((resolve) => {
+                const modal = document.getElementById('confirmModal');
+                const titleEl = document.getElementById('confirmModalTitle');
+                const msgEl = document.getElementById('confirmModalMessage');
+                const okBtn = document.getElementById('confirmModalOk');
+                const cancelBtn = document.getElementById('confirmModalCancel');
+                
+                if (!modal) {
+                    // Fallback to native confirm if modal not found
+                    resolve(confirm(message));
+                    return;
+                }
+                
+                titleEl.textContent = title || 'Подтверждение';
+                msgEl.textContent = message || 'Вы уверены?';
+                
+                modal.style.display = 'flex';
+                modal.classList.remove('hidden');
+                
+                function cleanup() {
+                    modal.style.display = 'none';
+                    modal.classList.add('hidden');
+                    okBtn.removeEventListener('click', onOk);
+                    cancelBtn.removeEventListener('click', onCancel);
+                    modal.removeEventListener('click', onBackdrop);
+                }
+                
+                function onOk() {
+                    cleanup();
+                    resolve(true);
+                }
+                
+                function onCancel() {
+                    cleanup();
+                    resolve(false);
+                }
+                
+                function onBackdrop(e) {
+                    if (e.target === modal) {
+                        cleanup();
+                        resolve(false);
+                    }
+                }
+                
+                okBtn.addEventListener('click', onOk);
+                cancelBtn.addEventListener('click', onCancel);
+                modal.addEventListener('click', onBackdrop);
+            });
+        };
     </script>
 
     {% block scripts %}{% endblock %}

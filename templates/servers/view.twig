@@ -455,8 +455,8 @@ document.addEventListener('DOMContentLoaded', function() {
       e.preventDefault();
       e.stopPropagation();
       e.stopImmediatePropagation();
-      const confirmResult = confirm('Удалить протокол и всех его клиентов?');
-      if (!confirmResult) return;
+      const confirmed = await showConfirmModal('Удалить протокол и всех его клиентов?', 'Удаление протокола');
+      if (!confirmed) return;
       const slug = btn.getAttribute('data-slug');
       const m = document.getElementById('uninstallSpMsg');
       m.textContent = '';
