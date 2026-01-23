@@ -4,21 +4,24 @@
  * Handles creation and management of VPN client configurations
  * Based on amnezia_client_config_v2.php
  */
-class VpnClient {
+class VpnClient
+{
     private $clientId;
     private $data;
-    
-    public function __construct(?int $clientId = null) {
+
+    public function __construct(?int $clientId = null)
+    {
         $this->clientId = $clientId;
         if ($clientId) {
             $this->load();
         }
     }
-    
+
     /**
      * Load client data from database
      */
-    private function load(): void {
+    private function load(): void
+    {
         $pdo = DB::conn();
         $stmt = $pdo->prepare('SELECT * FROM vpn_clients WHERE id = ?');
         $stmt->execute([$this->clientId]);
@@ -27,7 +30,7 @@ class VpnClient {
             throw new Exception('Client not found');
         }
     }
-    
+
     /**
      * Create new VPN client
      * 
@@ -37,87 +40,523 @@ class VpnClient {
      * @param int|null $expiresInDays Days until expiration (null = never expires)
      * @return int Client ID
      */
-    public static function create(int $serverId, int $userId, string $name, ?int $expiresInDays = null): int {
+    public static function create(int $serverId, int $userId, string $name, ?int $expiresInDays = null, ?int $protocolId = null, ?string $username = null, ?string $login = null): int
+    {
         $pdo = DB::conn();
-        
-        // Sanitize client name (replace only spaces with underscores, allow any other characters including Cyrillic)
+
         $name = trim($name);
-        $name = str_replace(' ', '_', $name);
-        
+
         // Get server data
         $server = new VpnServer($serverId);
         $serverData = $server->getData();
-        
+
         if (!$serverData || $serverData['status'] !== 'active') {
             throw new Exception('Server is not active');
         }
-        
-        // Generate client keys
-        $containerName = $serverData['container_name'];
-        $keys = self::generateClientKeys($serverData, $name);
-        
-        // Get next available IP
+
+        // Determine protocol before sync
+        $protoRow = null;
+        if ($protocolId === null) {
+            $stmtProto = $pdo->prepare('SELECT id FROM protocols WHERE slug = ? LIMIT 1');
+            $stmtProto->execute([$serverData['install_protocol'] ?? '']);
+            $protocolId = (int) $stmtProto->fetchColumn();
+        }
+        if ($protocolId) {
+            $stmtProto2 = $pdo->prepare('SELECT * FROM protocols WHERE id = ?');
+            $stmtProto2->execute([$protocolId]);
+            $protoRow = $stmtProto2->fetch();
+        }
+        $slug = $protoRow['slug'] ?? ($serverData['install_protocol'] ?? 'amnezia-wg');
+        $isWireguard = in_array($slug, ['amnezia-wg-advanced', 'wireguard-standard', 'amnezia-wg'], true);
+
+        // Auto-sync server keys from container EVERY TIME for WireGuard protocols
+        // This ensures we always use current container configuration even if it was recreated
+        if ($isWireguard) {
+            try {
+                self::syncServerKeysFromContainer($server, $serverData);
+                // Reload server data after sync (VpnServer caches DB row in-memory)
+                $server->refresh();
+                $serverData = $server->getData();
+            } catch (Exception $e) {
+                error_log('Failed to auto-sync server keys: ' . $e->getMessage());
+                // Continue anyway - might fail later but let's try
+            }
+        }
+
         $clientIP = self::getNextClientIP($serverData);
-        
-        // Get AWG parameters from server
-        $awgParams = json_decode($serverData['awg_params'], true);
-        
-        // Build client configuration
-        $config = self::buildClientConfig(
-            $keys['private'],
-            $clientIP,
-            $serverData['server_public_key'],
-            $serverData['preshared_key'],
-            $serverData['host'],
-            $serverData['vpn_port'],
-            $awgParams
-        );
-        
-        // Add client to server
-        self::addClientToServer($serverData, $keys['public'], $clientIP);
-        
-        // Generate QR code
-        $qrCode = self::generateQRCode($config);
-        
+        $loginBase = $login !== null && $login !== '' ? $login : $name;
+        $loginBase = str_replace(' ', '_', trim($loginBase));
+        $loginFinal = $loginBase;
+        $suffix = 2;
+        while (true) {
+            $stmtChk = $pdo->prepare('SELECT COUNT(*) FROM vpn_clients WHERE server_id = ? AND name = ?');
+            $stmtChk->execute([$serverId, $loginFinal]);
+            if ((int) $stmtChk->fetchColumn() === 0)
+                break;
+            $loginFinal = $loginBase . '-' . $suffix;
+            $suffix++;
+        }
+
+        if ($isWireguard) {
+            $containerName = $serverData['container_name'];
+            $keys = self::generateClientKeys($serverData, $name);
+
+            // Re-fetch awg_params after possible auto-sync
+            $awgParams = json_decode($serverData['awg_params'] ?? '{}', true) ?? [];
+
+            // Build variables for template
+            $vars = [
+                'private_key' => $keys['private'],
+                'client_ip' => $clientIP,
+                'server_public_key' => $serverData['server_public_key'],
+                'preshared_key' => $serverData['preshared_key'],
+                'server_host' => $serverData['host'],
+                'server_port' => $serverData['vpn_port'],
+                'dns_servers' => $serverData['dns_servers'] ?? '1.1.1.1, 1.0.0.1',
+            ];
+
+
+            // Add AWG parameters (use UPPERCASE keys as extracted from container)
+            foreach (['JC', 'JMIN', 'JMAX', 'S1', 'S2', 'H1', 'H2', 'H3', 'H4'] as $key) {
+                if (isset($awgParams[$key])) {
+                    $vars[$key] = $awgParams[$key];
+                } else {
+                    // Default values for AWG params
+                    $defaults = [
+                        'JC' => 5,
+                        'JMIN' => 100,
+                        'JMAX' => 200,
+                        'S1' => 50,
+                        'S2' => 100,
+                        'H1' => 1,
+                        'H2' => 2,
+                        'H3' => 3,
+                        'H4' => 4,
+                    ];
+                    $vars[$key] = $defaults[$key] ?? 0;
+                }
+            }
+
+            // Backward/Template compatibility: the AWG client template uses Jc/Jmin/Jmax (not all-caps).
+            // Ensure those placeholders are always populated.
+            if (!isset($vars['Jc']) && isset($vars['JC'])) {
+                $vars['Jc'] = (string) $vars['JC'];
+            }
+            if (!isset($vars['Jmin']) && isset($vars['JMIN'])) {
+                $vars['Jmin'] = (string) $vars['JMIN'];
+            }
+            if (!isset($vars['Jmax']) && isset($vars['JMAX'])) {
+                $vars['Jmax'] = (string) $vars['JMAX'];
+            }
+
+            // Generate config from template
+            if ($protoRow && !empty($protoRow['output_template'])) {
+                require_once __DIR__ . '/ProtocolService.php';
+                $config = ProtocolService::generateProtocolOutput($protoRow, $vars);
+            } else {
+                // Fallback to old method if no template
+                $config = self::buildClientConfig(
+                    $keys['private'],
+                    $clientIP,
+                    $serverData['server_public_key'],
+                    $serverData['preshared_key'],
+                    $serverData['host'],
+                    $serverData['vpn_port'],
+                    is_array($awgParams) ? $awgParams : []
+                );
+            }
+
+            self::addClientToServer($serverData, $keys['public'], $clientIP);
+            $qrCode = self::generateQRCode($config);
+            $priv = $keys['private'];
+            $pub = $keys['public'];
+            $psk = $serverData['preshared_key'];
+            $pass = null;
+        } else {
+            $vars = [];
+            $vars['private_key'] = '';
+            $vars['client_ip'] = $clientIP;
+            $vars['server_host'] = $serverData['host'] ?? '';
+            $vars['server_port'] = $serverData['vpn_port'] ?? '';
+            $extras = [];
+            if ($protocolId) {
+                try {
+                    $stmtSp = $pdo->prepare('SELECT config_data FROM server_protocols WHERE server_id = ? AND protocol_id = ? LIMIT 1');
+                    $stmtSp->execute([$serverId, $protocolId]);
+                    $cfg = $stmtSp->fetchColumn();
+                    if ($cfg) {
+                        $conf = is_string($cfg) ? json_decode($cfg, true) : $cfg;
+                        if (is_array($conf)) {
+                            $vars['server_host'] = $conf['server_host'] ?? $vars['server_host'];
+                            $vars['server_port'] = $conf['server_port'] ?? $vars['server_port'];
+                            $extras = $conf['extras'] ?? [];
+                        }
+                    }
+                } catch (Exception $e) {
+                }
+            }
+            if (is_array($extras)) {
+                // If extras has 'result' subarray, merge it into extras for processing
+                if (isset($extras['result']) && is_array($extras['result'])) {
+                    $extras = array_merge($extras, $extras['result']);
+                }
+                
+                foreach ($extras as $k => $v) {
+                    if (is_scalar($v)) {
+                        // Preserve uppercase for AWG obfuscation parameters
+                        if (in_array($k, ['Jc', 'Jmin', 'Jmax', 'S1', 'S2', 'H1', 'H2', 'H3', 'H4'], true)) {
+                            $vars[$k] = (string) $v;
+                        } else {
+                            $vars[strtolower($k)] = (string) $v;
+                        }
+                    }
+                }
+                if (isset($vars['publickey']) && empty($vars['reality_public_key'])) {
+                    $vars['reality_public_key'] = $vars['publickey'];
+                }
+                if (isset($vars['shortid']) && empty($vars['reality_short_id'])) {
+                    $vars['reality_short_id'] = $vars['shortid'];
+                }
+                if (isset($vars['servername']) && empty($vars['reality_server_name'])) {
+                    $vars['reality_server_name'] = $vars['servername'];
+                }
+                if (isset($vars['containername']) && empty($vars['container_name'])) {
+                    $vars['container_name'] = $vars['containername'];
+                }
+            }
+            if ($slug === 'xray-vless') {
+                if (empty($vars['server_port'])) {
+                    if (is_array($extras) && isset($extras['result']) && is_array($extras['result'])) {
+                        $res = $extras['result'];
+                        if (isset($res['xray_port']) && is_scalar($res['xray_port'])) {
+                            $vars['server_port'] = (string) $res['xray_port'];
+                        }
+                        if (empty($vars['server_port'])) {
+                            foreach ($res as $rk => $rv) {
+                                if (is_string($rk) && stripos($rk, 'xray_port') !== false && is_scalar($rv)) {
+                                    $vars['server_port'] = (string) $rv;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                $needReality = empty($vars['reality_public_key']) || empty($vars['reality_server_name']) || empty($vars['reality_short_id']);
+                if (empty($vars['client_id']) || $needReality) {
+                    $containerName = 'amnezia-xray';
+                    if (is_array($extras) && isset($extras['result']) && is_array($extras['result'])) {
+                        $res = $extras['result'];
+                        if (isset($res['container_name']) && is_scalar($res['container_name'])) {
+                            $containerName = trim((string) $res['container_name']) ?: $containerName;
+                        }
+                    }
+                    try {
+                        $cfg = $server->executeCommand("docker exec -i " . escapeshellarg($containerName) . " cat /opt/amnezia/xray/server.json 2>/dev/null", true);
+                        if (trim((string) $cfg) === '') {
+                            $cfg = $server->executeCommand("docker exec -i " . escapeshellarg($containerName) . " cat /etc/xray/config.json 2>/dev/null", true);
+                        }
+                        $decoded = json_decode(trim((string) $cfg), true);
+                        if (is_array($decoded)) {
+                            $inbounds = $decoded['inbounds'] ?? [];
+                            if (is_array($inbounds) && !empty($inbounds)) {
+                                $settings = $inbounds[0]['settings'] ?? [];
+                                $clients = $settings['clients'] ?? [];
+                                if (is_array($clients) && !empty($clients)) {
+                                    $cid = $clients[0]['id'] ?? null;
+                                    if (is_string($cid) && $cid !== '' && empty($vars['client_id'])) {
+                                        $vars['client_id'] = $cid;
+                                    }
+                                }
+                                $stream = $inbounds[0]['streamSettings'] ?? [];
+                                if (is_array($stream) && ($stream['security'] ?? '') === 'reality') {
+                                    $rs = $stream['realitySettings'] ?? [];
+                                    $serverNames = $rs['serverNames'] ?? ($rs['serverName'] ?? []);
+                                    $shortIds = $rs['shortIds'] ?? ($rs['shortId'] ?? []);
+                                    $serverName = is_array($serverNames) ? ($serverNames[0] ?? null) : (is_string($serverNames) ? $serverNames : null);
+                                    $shortId = is_array($shortIds) ? ($shortIds[0] ?? null) : (is_string($shortIds) ? $shortIds : null);
+                                    $privateKey = $rs['privateKey'] ?? null;
+                                    if (is_string($serverName) && $serverName !== '') {
+                                        $vars['reality_server_name'] = $serverName;
+                                    }
+                                    if (is_string($shortId) && $shortId !== '') {
+                                        $vars['reality_short_id'] = $shortId;
+                                    }
+                                    if (is_string($privateKey) && $privateKey !== '' && function_exists('sodium_crypto_scalarmult_base')) {
+                                        $b64 = strtr($privateKey, '-_', '+/');
+                                        $padLen = strlen($b64) % 4;
+                                        if ($padLen) {
+                                            $b64 .= str_repeat('=', 4 - $padLen);
+                                        }
+                                        $bin = base64_decode($b64, true);
+                                        if ($bin === false) {
+                                            $pk = $privateKey;
+                                            $padLen2 = strlen($pk) % 4;
+                                            if ($padLen2) {
+                                                $pk .= str_repeat('=', 4 - $padLen2);
+                                            }
+                                            $bin = base64_decode($pk, true);
+                                        }
+                                        if (is_string($bin) && strlen($bin) === 32) {
+                                            $pub = sodium_crypto_scalarmult_base($bin);
+                                            $vars['reality_public_key'] = rtrim(strtr(base64_encode($pub), '+/', '-_'), '=');
+                                        }
+                                    }
+                                    if (is_string($privateKey) && $privateKey !== '' && empty($vars['reality_public_key'])) {
+                                        $cmd = "docker exec -i " . escapeshellarg($containerName) . " /usr/bin/xray x25519 -i " . escapeshellarg($privateKey) . " 2>/dev/null";
+                                        $out = $server->executeCommand($cmd, true);
+                                        $outTrim = trim((string) $out);
+                                        if ($outTrim !== '') {
+                                            $pub = '';
+                                            if (preg_match('/[Pp]ublic\s*[Kk]ey[:\s]+(.+)/', $outTrim, $mm)) {
+                                                $pub = trim((string) $mm[1]);
+                                            } else {
+                                                $pub = $outTrim;
+                                            }
+                                            if ($pub !== '') {
+                                                $vars['reality_public_key'] = $pub;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } catch (Exception $e) {
+                    }
+                }
+            }
+            if ($slug === 'openvpn') {
+                $containerName = $serverData['container_name'] ?? 'openvpn';
+                $config = '';
+
+                // Try to generate config via Docker
+                try {
+                    // 1. Generate client certificate (ignore output)
+                    $server->executeCommand("docker run --rm -v openvpn-data:/etc/openvpn kylemanna/openvpn easyrsa build-client-full " . escapeshellarg($loginFinal) . " nopass", true);
+
+                    // 2. Get full client config
+                    $fullConfig = $server->executeCommand("docker run --rm -v openvpn-data:/etc/openvpn kylemanna/openvpn ovpn_getclient " . escapeshellarg($loginFinal), true);
+
+                    if (trim($fullConfig) !== '' && strpos($fullConfig, 'BEGIN CERTIFICATE') !== false) {
+                        $config = $fullConfig;
+                        $protoRow = null; // Skip template generation
+                    }
+                } catch (Exception $e) {
+                    // Fallback to template
+                }
+
+                if (empty($config)) {
+                    if (empty($vars['server_port']) || !preg_match('/^\d+$/', (string) $vars['server_port'])) {
+                        $vars['server_port'] = '1194';
+                    }
+                    if (empty($vars['protocol'])) {
+                        $vars['protocol'] = 'udp';
+                    }
+                    if (empty($vars['proto'])) {
+                        $vars['proto'] = $vars['protocol'];
+                    }
+                    if (empty($vars['port'])) {
+                        $vars['port'] = $vars['server_port'];
+                    }
+                    if (empty($vars['host'])) {
+                        $vars['host'] = $vars['server_host'];
+                    }
+                }
+            }
+            $pass = null;
+            $pwdCmd = isset($protoRow['password_command']) ? trim((string) $protoRow['password_command']) : '';
+            if ($pwdCmd !== '') {
+                try {
+                    $wrapper = "bash <<'EOS'\nLOGIN=" . escapeshellarg($loginFinal) . "\n" . $pwdCmd . "\nEOS";
+                    $out = $server->executeCommand($wrapper, true);
+                    $passTrim = trim((string) $out);
+                    if ($passTrim !== '')
+                        $pass = $passTrim;
+                } catch (Exception $e) {
+                }
+            }
+            if ($pass === null) {
+                if (!empty($vars['password'])) {
+                    $pass = (string) $vars['password'];
+                } else {
+                    $pass = 'amnezia';
+                }
+            }
+            $vars['login'] = $loginFinal;
+            $vars['password'] = $pass;
+            if (($slug ?? '') === 'smb' && empty($vars['password'])) {
+                $vars['password'] = $pass;
+            }
+            $config = $protoRow ? ProtocolService::generateProtocolOutput($protoRow, $vars) : '';
+
+            // Prepare last_config_json for QR code generation if config is JSON (XRay)
+            if ($config !== '' && ($decoded = json_decode($config)) !== null) {
+                $vars['last_config_json'] = json_encode($decoded, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+            }
+
+            $qrCode = self::generateQRCode($config);
+
+            $priv = '';
+            $pub = '';
+            $psk = '';
+        }
+
         // Calculate expiration date
         $expiresAt = $expiresInDays ? date('Y-m-d H:i:s', strtotime("+{$expiresInDays} days")) : null;
-        
+
         // Insert into database
         $stmt = $pdo->prepare('
             INSERT INTO vpn_clients 
-            (server_id, user_id, name, client_ip, public_key, private_key, preshared_key, config, qr_code, status, expires_at) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (server_id, user_id, protocol_id, name, client_ip, public_key, private_key, preshared_key, config, qr_code, status, expires_at) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ');
-        
+
         $stmt->execute([
             $serverId,
             $userId,
-            $name,
+            $protocolId ?: null,
+            $loginFinal,
             $clientIP,
-            $keys['public'],
-            $keys['private'],
-            $serverData['preshared_key'],
+            $pub,
+            $priv,
+            $psk,
             $config,
             $qrCode,
             'active',
             $expiresAt
         ]);
-        
-        return (int)$pdo->lastInsertId();
+
+        return (int) $pdo->lastInsertId();
     }
-    
+
+    public static function listByServerAndProtocol(int $serverId, int $protocolId): array
+    {
+        $pdo = DB::conn();
+        $stmt = $pdo->prepare('
+            SELECT c.*, p.name as protocol_name 
+            FROM vpn_clients c
+            LEFT JOIN protocols p ON c.protocol_id = p.id
+            WHERE c.server_id = ? AND c.protocol_id = ? 
+            ORDER BY c.created_at DESC
+        ');
+        $stmt->execute([$serverId, $protocolId]);
+        return $stmt->fetchAll();
+    }
+
+    /**
+     * Import client data directly from backup without touching remote server.
+     */
+    public static function importFromBackup(array $serverData, int $userId, array $clientData): ?int
+    {
+        if (empty($serverData['id'])) {
+            throw new Exception('Server must be saved before importing clients');
+        }
+
+        $pdo = DB::conn();
+
+        $clientIp = trim($clientData['client_ip'] ?? '');
+        $publicKey = trim($clientData['public_key'] ?? '');
+        $privateKey = trim($clientData['private_key'] ?? '');
+
+        if ($clientIp === '' || $publicKey === '' || $privateKey === '') {
+            throw new Exception('Client backup data is incomplete');
+        }
+
+        // Skip if client with same IP already exists
+        $stmt = $pdo->prepare('SELECT id FROM vpn_clients WHERE server_id = ? AND client_ip = ? LIMIT 1');
+        $stmt->execute([$serverData['id'], $clientIp]);
+        if ($stmt->fetchColumn()) {
+            return null;
+        }
+
+        $name = trim($clientData['name'] ?? '');
+        if ($name === '') {
+            $name = $clientIp;
+        }
+
+        $presharedKey = $clientData['preshared_key'] ?? ($serverData['preshared_key'] ?? '');
+        $config = $clientData['config'] ?? '';
+
+        if ($config === '' && !empty($serverData['server_public_key']) && !empty($serverData['host']) && !empty($serverData['vpn_port'])) {
+            $awgParams = json_decode($serverData['awg_params'] ?? '{}', true);
+            if (!is_array($awgParams)) {
+                $awgParams = [];
+            }
+            $config = self::buildClientConfig(
+                $privateKey,
+                $clientIp,
+                $serverData['server_public_key'],
+                $presharedKey,
+                $serverData['host'],
+                (int) $serverData['vpn_port'],
+                $awgParams
+            );
+        }
+
+        // Try to fetch protocol for QR code generation
+        $protocol = null;
+        if (!empty($serverData['install_protocol'])) {
+            $stmtP = $pdo->prepare('SELECT * FROM protocols WHERE slug = ?');
+            $stmtP->execute([$serverData['install_protocol']]);
+            $protocol = $stmtP->fetch(PDO::FETCH_ASSOC);
+        }
+
+        $vars = [];
+        // Prepare last_config_json if config is JSON
+        if ($config !== '' && ($decoded = json_decode($config)) !== null) {
+            $vars['last_config_json'] = json_encode($decoded, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+        }
+
+        $qrCode = $config !== '' ? self::generateQRCode($config) : '';
+        $status = strtolower($clientData['status'] ?? 'active') === 'disabled' ? 'disabled' : 'active';
+
+        $expiresAt = $clientData['expires_at'] ?? null;
+        if ($expiresAt) {
+            $timestamp = strtotime($expiresAt);
+            $expiresAt = $timestamp ? date('Y-m-d H:i:s', $timestamp) : null;
+        }
+
+        $stmt = $pdo->prepare('
+            INSERT INTO vpn_clients 
+            (server_id, user_id, name, client_ip, public_key, private_key, preshared_key, config, qr_code, status, expires_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ');
+
+        $stmt->execute([
+            $serverData['id'],
+            $userId,
+            $name,
+            $clientIp,
+            $publicKey,
+            $privateKey,
+            $presharedKey,
+            $config,
+            $qrCode,
+            $status,
+            $expiresAt
+        ]);
+
+        return (int) $pdo->lastInsertId();
+    }
+
     /**
      * Generate client keys on remote server
      */
-    private static function generateClientKeys(array $serverData, string $clientName): array {
+    private static function generateClientKeys(array $serverData, string $clientName): array
+    {
         $containerName = $serverData['container_name'];
-        
+        $token = bin2hex(random_bytes(8));
+
         $cmd = sprintf(
             "docker exec -i %s sh -c \"umask 077; wg genkey | tee /tmp/%s_priv.key | wg pubkey > /tmp/%s_pub.key; cat /tmp/%s_priv.key; echo '---'; cat /tmp/%s_pub.key; rm -f /tmp/%s_priv.key /tmp/%s_pub.key\"",
             $containerName,
-            $clientName, $clientName, $clientName, $clientName, $clientName, $clientName
+            $token,
+            $token,
+            $token,
+            $token,
+            $token,
+            $token
         );
-        
+
         $escaped = escapeshellarg($cmd);
         $sshCmd = sprintf(
             "sshpass -p '%s' ssh -p %d -q -o LogLevel=ERROR -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o PreferredAuthentications=password -o PubkeyAuthentication=no %s@%s %s 2>&1",
@@ -127,41 +566,63 @@ class VpnClient {
             $serverData['host'],
             $escaped
         );
-        
+
         $out = shell_exec($sshCmd);
         $parts = explode("---", trim($out));
-        
+
         if (count($parts) < 2) {
             throw new Exception("Failed to generate client keys");
         }
-        
+
         return [
             'private' => trim($parts[0]),
             'public' => trim($parts[1])
         ];
     }
-    
+
     /**
      * Get next available client IP
      */
-    private static function getNextClientIP(array $serverData): string {
+    private static function getNextClientIP(array $serverData): string
+    {
         $pdo = DB::conn();
-        
+
         // Get used IPs from database
         $stmt = $pdo->prepare('SELECT client_ip FROM vpn_clients WHERE server_id = ?');
         $stmt->execute([$serverData['id']]);
         $usedIPs = $stmt->fetchAll(PDO::FETCH_COLUMN);
-        
-        // Parse subnet
-        $parts = explode('/', $serverData['vpn_subnet']);
-        $networkLong = ip2long($parts[0]);
-        
+
         // Reserve network address
         $used = ['10.8.1.0' => true];
         foreach ($usedIPs as $ip) {
             $used[$ip] = true;
         }
-        
+
+        // ALSO check IPs used in actual server config (catches clients created outside web panel)
+        try {
+            $containerName = $serverData['container_name'] ?? 'amnezia-awg';
+            $server = new VpnServer($serverData['id']);
+            $cmd = sprintf(
+                "docker exec %s cat /opt/amnezia/awg/wg0.conf 2>/dev/null",
+                escapeshellarg($containerName)
+            );
+            $serverConfig = $server->executeCommand($cmd, true);
+
+            // Extract AllowedIPs from all peers
+            if (preg_match_all('/AllowedIPs\s*=\s*([0-9.]+)\/\d+/i', $serverConfig, $matches)) {
+                foreach ($matches[1] as $ip) {
+                    $used[$ip] = true;
+                }
+            }
+        } catch (Exception $e) {
+            error_log('Failed to check server config for used IPs: ' . $e->getMessage());
+            // Continue with DB-only check
+        }
+
+        // Parse subnet
+        $parts = explode('/', $serverData['vpn_subnet']);
+        $networkLong = ip2long($parts[0]);
+
         // Find next free IP starting from .1
         for ($i = 1; $i <= 253; $i++) {
             $candidate = long2ip($networkLong + $i);
@@ -169,10 +630,166 @@ class VpnClient {
                 return $candidate;
             }
         }
-        
+
         throw new Exception('No free IP addresses in subnet');
     }
-    
+
+    /**
+     * Auto-sync server keys from running container (for externally installed protocols)
+     */
+    private static function extractAwgParamsFromWg0Conf(VpnServer $server, string $containerName, string $confPath): array
+    {
+        $awgParams = [];
+
+        $awgLinesCmd = sprintf(
+            "docker exec %s sh -c \"grep -E '^[[:space:]]*(Jc|Jmin|Jmax|S1|S2|H1|H2|H3|H4)[[:space:]]*=' %s 2>/dev/null || true\"",
+            escapeshellarg($containerName),
+            escapeshellarg($confPath)
+        );
+        $awgLines = (string) $server->executeCommand($awgLinesCmd, true);
+
+        foreach (preg_split('/\r?\n/', trim($awgLines)) as $line) {
+            $line = trim($line);
+            if ($line === '') {
+                continue;
+            }
+            if (preg_match('/^(Jc|Jmin|Jmax|S1|S2|H1|H2|H3|H4)\s*=\s*(\d+)\s*$/i', $line, $m)) {
+                $k = strtoupper($m[1]);
+                $awgParams[$k] = (int) $m[2];
+            }
+        }
+
+        return $awgParams;
+    }
+
+    private static function extractPeerPskFromWgDump(VpnServer $server, string $containerName, string $clientPublicKey): ?string
+    {
+        $clientPublicKey = trim($clientPublicKey);
+        if ($clientPublicKey === '') {
+            return null;
+        }
+
+        // wg show wg0 dump peer line format:
+        // public_key \t preshared_key \t endpoint \t allowed_ips \t latest_handshake \t rx \t tx \t keepalive
+        $cmdDump = sprintf('docker exec %s wg show wg0 dump 2>/dev/null || true', escapeshellarg($containerName));
+        $dump = (string) $server->executeCommand($cmdDump, true);
+        foreach (preg_split('/\r?\n/', trim($dump)) as $line) {
+            if ($line === '') {
+                continue;
+            }
+            // Skip interface header line (has many fields but first field is private key)
+            if (strpos($line, '\t') === false) {
+                continue;
+            }
+            if (strpos($line, $clientPublicKey . "\t") !== 0) {
+                continue;
+            }
+
+            $parts = explode("\t", $line);
+            if (count($parts) < 2) {
+                return null;
+            }
+            $psk = trim((string) $parts[1]);
+            if ($psk === '' || $psk === '(none)') {
+                return null;
+            }
+            return $psk;
+        }
+
+        return null;
+    }
+
+    private static function syncServerKeysFromContainer(VpnServer $server, array $serverData): void
+    {
+        $containerName = $serverData['container_name'] ?? 'amnezia-awg';
+
+        try {
+            // Try to get public key from wg show
+            $pubKeyCmd = "docker exec $containerName wg show wg0 2>/dev/null | grep 'public key:' | awk '{print \$3}'";
+            $pubKey = trim($server->executeCommand($pubKeyCmd, true));
+
+            // Get listening port
+            $portCmd = "docker exec $containerName wg show wg0 2>/dev/null | grep 'listening port:' | awk '{print \$3}'";
+            $port = trim($server->executeCommand($portCmd, true));
+
+            // PresharedKey is stored per-peer, and in this project we persist it in wireguard_psk.key.
+            // Prefer that file (stable) and fall back to parsing the first peer PSK from wg0.conf.
+            $psk = '';
+
+            $pskKeyFileCmd = "docker exec $containerName sh -c \"cat /opt/amnezia/awg/wireguard_psk.key 2>/dev/null || true\"";
+            $psk = trim($server->executeCommand($pskKeyFileCmd, true));
+
+            if ($psk === '') {
+                $pskFromConfCmd = "docker exec $containerName sh -c \"grep -E '^[[:space:]]*PresharedKey[[:space:]]*=' /opt/amnezia/awg/wg0.conf 2>/dev/null | head -1 | sed -E 's/^[[:space:]]*PresharedKey[[:space:]]*=[[:space:]]*//' | tr -d '\\r'\" 2>/dev/null || true";
+                $psk = trim($server->executeCommand($pskFromConfCmd, true));
+            }
+
+            if ($psk === '') {
+                $pskFromAltConfCmd = "docker exec $containerName sh -c \"grep -E '^[[:space:]]*PresharedKey[[:space:]]*=' /etc/wireguard/wg0.conf 2>/dev/null | head -1 | sed -E 's/^[[:space:]]*PresharedKey[[:space:]]*=[[:space:]]*//' | tr -d '\\r'\" 2>/dev/null || true";
+                $psk = trim($server->executeCommand($pskFromAltConfCmd, true));
+            }
+
+            // Extract DNS from config
+            $dnsCmd = "docker exec $containerName sh -c \"grep -E '^DNS' /opt/amnezia/awg/wg0.conf 2>/dev/null | head -1 | cut -d= -f2 | tr -d '[:space:]'\" 2>/dev/null || echo ''";
+            $dns = trim($server->executeCommand($dnsCmd, true));
+
+            if (empty($dns)) {
+                // Try alternative config location
+                $dnsCmd2 = "docker exec $containerName sh -c \"grep -E '^DNS' /etc/wireguard/wg0.conf 2>/dev/null | head -1 | cut -d= -f2 | tr -d '[:space:]'\" 2>/dev/null || echo ''";
+                $dns = trim($server->executeCommand($dnsCmd2, true));
+            }
+
+            // Default DNS if not found
+            if (empty($dns)) {
+                $dns = '1.1.1.1, 1.0.0.1';
+            }
+
+            // Extract AWG parameters.
+            // NOTE: amnezia-awg does not expose these via `wg show` in many builds,
+            // so we primarily read them from /opt/amnezia/awg/wg0.conf.
+            $awgParams = [];
+
+            // Legacy attempt: some builds print jc/jmin/... in `wg show` output.
+            $wgShowCmd = "docker exec $containerName wg show wg0 2>/dev/null";
+            $wgOutput = (string) $server->executeCommand($wgShowCmd, true);
+            $paramNames = ['jc', 'jmin', 'jmax', 's1', 's2', 'h1', 'h2', 'h3', 'h4'];
+            foreach ($paramNames as $param) {
+                if (preg_match('/^\s*' . preg_quote($param, '/') . ':\s*(\d+)/mi', $wgOutput, $matches)) {
+                    $awgParams[strtoupper($param)] = (int) $matches[1];
+                }
+            }
+
+            // Primary source: wg0.conf
+            if (empty($awgParams)) {
+                $awgParams = self::extractAwgParamsFromWg0Conf($server, $containerName, '/opt/amnezia/awg/wg0.conf');
+                if (empty($awgParams)) {
+                    $awgParams = self::extractAwgParamsFromWg0Conf($server, $containerName, '/etc/wireguard/wg0.conf');
+                }
+            }
+
+            // Update database if we found keys
+            if (!empty($pubKey) && !empty($port)) {
+                $pdo = DB::conn();
+
+                $awgParamsJson = !empty($awgParams) ? json_encode($awgParams) : null;
+
+                // Update vpn_servers with all extracted values including DNS
+                if (!empty($psk)) {
+                    $stmt = $pdo->prepare('UPDATE vpn_servers SET server_public_key = ?, preshared_key = ?, vpn_port = ?, awg_params = ?, dns_servers = ? WHERE id = ?');
+                    $stmt->execute([$pubKey, $psk, (int) $port, $awgParamsJson, $dns, $serverData['id']]);
+                } else {
+                    $stmt = $pdo->prepare('UPDATE vpn_servers SET server_public_key = ?, vpn_port = ?, awg_params = ?, dns_servers = ? WHERE id = ?');
+                    $stmt->execute([$pubKey, (int) $port, $awgParamsJson, $dns, $serverData['id']]);
+                }
+
+                error_log("Auto-synced server keys from container $containerName: port=$port, dns=$dns, awg_params=" . ($awgParamsJson ?? 'none'));
+            }
+        } catch (Exception $e) {
+            error_log('Error syncing keys from container: ' . $e->getMessage());
+            throw $e;
+        }
+    }
+
     /**
      * Build client configuration file
      */
@@ -189,74 +806,89 @@ class VpnClient {
         $config .= "PrivateKey = {$privateKey}\n";
         $config .= "Address = {$clientIP}/32\n";
         $config .= "DNS = 1.1.1.1, 1.0.0.1\n";
-        
+
         // Add AWG parameters
         foreach (['Jc', 'Jmin', 'Jmax', 'S1', 'S2', 'H1', 'H2', 'H3', 'H4'] as $key) {
             if (isset($awgParams[$key])) {
                 $config .= "{$key} = {$awgParams[$key]}\n";
+                continue;
+            }
+
+            // Accept uppercase keys too (JC/JMIN/JMAX/...)
+            $alt = strtoupper($key);
+            if (isset($awgParams[$alt])) {
+                $config .= "{$key} = {$awgParams[$alt]}\n";
             }
         }
-        
+
         $config .= "\n[Peer]\n";
         $config .= "PublicKey = {$serverPublicKey}\n";
         $config .= "PresharedKey = {$presharedKey}\n";
         $config .= "Endpoint = {$serverHost}:{$serverPort}\n";
         $config .= "AllowedIPs = 0.0.0.0/0, ::/0\n";
         $config .= "PersistentKeepalive = 25\n";
-        
+
         return $config;
     }
-    
+
     /**
-     * Add client to server using official method (append + wg syncconf)
+     * Add client to server using wg set (more reliable than syncconf)
      */
-    private static function addClientToServer(array $serverData, string $publicKey, string $clientIP): void {
+    private static function addClientToServer(array $serverData, string $publicKey, string $clientIP): void
+    {
         $containerName = $serverData['container_name'];
-        
-        // Build peer block
+        $presharedKey = $serverData['preshared_key'];
+
+        // 1. Create temp file for PSK (to avoid shell escaping issues)
+        $pskFile = '/tmp/' . bin2hex(random_bytes(8)) . '.psk';
+        $cmd1 = sprintf("docker exec -i %s sh -c 'echo \"%s\" > %s'", $containerName, $presharedKey, $pskFile);
+        self::executeServerCommand($serverData, $cmd1, true);
+
+        // 2. Add peer using wg set
+        // wg set wg0 peer <PUBKEY> preshared-key <FILE> allowed-ips <IPS>
+        $cmd2 = sprintf(
+            "docker exec -i %s wg set wg0 peer %s preshared-key %s allowed-ips %s/32",
+            $containerName,
+            escapeshellarg($publicKey),
+            $pskFile,
+            $clientIP
+        );
+        self::executeServerCommand($serverData, $cmd2, true);
+
+        // 3. Remove temp PSK file
+        $cmd3 = sprintf("docker exec -i %s rm -f %s", $containerName, $pskFile);
+        self::executeServerCommand($serverData, $cmd3, true);
+
+        // 4. Persist to wg0.conf (append)
         $peerBlock = "\n[Peer]\n";
         $peerBlock .= "PublicKey = {$publicKey}\n";
-        $peerBlock .= "PresharedKey = {$serverData['preshared_key']}\n";
+        $peerBlock .= "PresharedKey = {$presharedKey}\n";
         $peerBlock .= "AllowedIPs = {$clientIP}/32\n";
-        
-        $escaped = addslashes($peerBlock);
-        $tempFile = '/tmp/' . bin2hex(random_bytes(8)) . '.tmp';
-        
-        // Create temp file
-        $cmd1 = sprintf("docker exec -i %s sh -c 'echo \"%s\" > %s'", $containerName, $escaped, $tempFile);
-        self::executeServerCommand($serverData, $cmd1, true);
-        
-        // Append to wg0.conf
-        $cmd2 = sprintf("docker exec -i %s sh -c 'cat %s >> /opt/amnezia/awg/wg0.conf'", $containerName, $tempFile);
-        self::executeServerCommand($serverData, $cmd2, true);
-        
-        // Apply via wg syncconf
-        $cmd3 = sprintf("docker exec -i %s bash -c 'wg syncconf wg0 <(wg-quick strip /opt/amnezia/awg/wg0.conf)'", $containerName);
-        self::executeServerCommand($serverData, $cmd3, true);
-        
-        // Remove temp file
-        $cmd4 = sprintf("docker exec -i %s rm -f %s", $containerName, $tempFile);
+
+        $escapedBlock = addslashes($peerBlock);
+        $cmd4 = sprintf("docker exec -i %s sh -c 'echo \"%s\" >> /opt/amnezia/awg/wg0.conf'", $containerName, $escapedBlock);
         self::executeServerCommand($serverData, $cmd4, true);
-        
-        // Update clientsTable
+
+        // 5. Update clientsTable
         self::updateClientsTable($serverData, $publicKey, $clientIP);
     }
-    
+
     /**
      * Update clientsTable on server
      */
-    private static function updateClientsTable(array $serverData, string $publicKey, string $name): void {
+    private static function updateClientsTable(array $serverData, string $publicKey, string $name): void
+    {
         $containerName = $serverData['container_name'];
-        
+
         // Read current table
         $cmd = sprintf("docker exec -i %s cat /opt/amnezia/awg/clientsTable 2>/dev/null", $containerName);
         $tableJson = self::executeServerCommand($serverData, $cmd, true);
         $table = json_decode(trim($tableJson), true);
-        
+
         if (!is_array($table)) {
             $table = [];
         }
-        
+
         // Add new client
         $table[] = [
             'clientId' => $publicKey,
@@ -265,22 +897,23 @@ class VpnClient {
                 'creationDate' => date('D M j H:i:s Y')
             ]
         ];
-        
+
         // Save back
         $newTableJson = json_encode($table, JSON_PRETTY_PRINT);
         $escaped = addslashes($newTableJson);
         $updateCmd = sprintf("docker exec -i %s sh -c 'echo \"%s\" > /opt/amnezia/awg/clientsTable'", $containerName, $escaped);
         self::executeServerCommand($serverData, $updateCmd, true);
     }
-    
+
     /**
      * Execute command on server
      */
-    private static function executeServerCommand(array $serverData, string $command, bool $sudo = false): string {
+    private static function executeServerCommand(array $serverData, string $command, bool $sudo = false): string
+    {
         if ($sudo && strtolower($serverData['username']) !== 'root') {
             $command = "echo '{$serverData['password']}' | sudo -S " . $command;
         }
-        
+
         $escapedCommand = escapeshellarg($command);
         $sshCommand = sprintf(
             "sshpass -p '%s' ssh  -p %d -q -o LogLevel=ERROR -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o PreferredAuthentications=password -o PubkeyAuthentication=no %s@%s %s 2>&1",
@@ -290,17 +923,18 @@ class VpnClient {
             $serverData['host'],
             $escapedCommand
         );
-        
+
         return shell_exec($sshCommand) ?? '';
     }
-    
+
     /**
      * Generate QR code for configuration using Amnezia format
      * Uses working QrUtil from /Users/oleg/Documents/amnezia
      */
-    private static function generateQRCode(string $config): string {
+    private static function generateQRCode(string $config): string
+    {
         require_once __DIR__ . '/QrUtil.php';
-        
+
         try {
             // Use old Amnezia format with Qt/QDataStream encoding
             $payloadOld = QrUtil::encodeOldPayloadFromConf($config);
@@ -311,127 +945,157 @@ class VpnClient {
             return ''; // QR code generation failed, but continue
         }
     }
-    
+
     /**
      * Get all clients for a server
      */
-    public static function listByServer(int $serverId): array {
+    public static function listByServer(int $serverId): array
+    {
         $pdo = DB::conn();
-        $stmt = $pdo->prepare('SELECT * FROM vpn_clients WHERE server_id = ? ORDER BY created_at DESC');
+        $stmt = $pdo->prepare('
+            SELECT c.*, p.name as protocol_name, p.show_text_content
+            FROM vpn_clients c
+            LEFT JOIN protocols p ON c.protocol_id = p.id
+            WHERE c.server_id = ? 
+            ORDER BY c.created_at DESC
+        ');
         $stmt->execute([$serverId]);
         return $stmt->fetchAll();
     }
-    
+
     /**
      * Get all clients for a user
      */
-    public static function listByUser(int $userId): array {
+    public static function listByUser(int $userId): array
+    {
         $pdo = DB::conn();
         $stmt = $pdo->prepare('
-            SELECT c.*, s.name as server_name, s.host as server_host
+            SELECT c.*, s.name as server_name, s.host as server_host, p.name as protocol_name, p.show_text_content
             FROM vpn_clients c
             LEFT JOIN vpn_servers s ON c.server_id = s.id
+            LEFT JOIN protocols p ON c.protocol_id = p.id
             WHERE c.user_id = ?
             ORDER BY c.created_at DESC
         ');
         $stmt->execute([$userId]);
         return $stmt->fetchAll();
     }
-    
+
     /**
      * Revoke client access (disable without deleting)
      */
-    public function revoke(): bool {
+    public function revoke(): bool
+    {
         if (!$this->data) {
             throw new Exception('Client not loaded');
         }
-        
-        // Remove from server
-        $server = new VpnServer($this->data['server_id']);
-        $serverData = $server->getData();
-        
-        if ($serverData && $serverData['status'] === 'active') {
-            try {
-                self::removeClientFromServer($serverData, $this->data['public_key']);
-            } catch (Exception $e) {
-                error_log('Failed to remove client from server: ' . $e->getMessage());
+
+        $isWireguard = self::isWireguardProtocol((int) ($this->data['protocol_id'] ?? 0));
+        if ($isWireguard) {
+            $server = new VpnServer($this->data['server_id']);
+            $serverData = $server->getData();
+            if ($serverData && $serverData['status'] === 'active') {
+                try {
+                    self::removeClientFromServer($serverData, $this->data['public_key']);
+                } catch (Exception $e) {
+                    error_log('Failed to remove client from server: ' . $e->getMessage());
+                }
             }
         }
-        
+
         // Mark as disabled in database
         $pdo = DB::conn();
         $stmt = $pdo->prepare('UPDATE vpn_clients SET status = ? WHERE id = ?');
         return $stmt->execute(['disabled', $this->clientId]);
     }
-    
+
     /**
      * Restore client access
      */
-    public function restore(): bool {
+    public function restore(): bool
+    {
         if (!$this->data) {
             throw new Exception('Client not loaded');
         }
-        
-        // Re-add to server
-        $server = new VpnServer($this->data['server_id']);
-        $serverData = $server->getData();
-        
-        if ($serverData && $serverData['status'] === 'active') {
-            try {
-                self::addClientToServer($serverData, $this->data['public_key'], $this->data['client_ip']);
-            } catch (Exception $e) {
-                throw new Exception('Failed to restore client on server: ' . $e->getMessage());
+
+        $isWireguard = self::isWireguardProtocol((int) ($this->data['protocol_id'] ?? 0));
+        if ($isWireguard) {
+            $server = new VpnServer($this->data['server_id']);
+            $serverData = $server->getData();
+            if ($serverData && $serverData['status'] === 'active') {
+                try {
+                    self::addClientToServer($serverData, $this->data['public_key'], $this->data['client_ip']);
+                } catch (Exception $e) {
+                    throw new Exception('Failed to restore client on server: ' . $e->getMessage());
+                }
             }
         }
-        
+
         // Mark as active in database
         $pdo = DB::conn();
         $stmt = $pdo->prepare('UPDATE vpn_clients SET status = ? WHERE id = ?');
         return $stmt->execute(['active', $this->clientId]);
     }
-    
+
+    private static function isWireguardProtocol(?int $protocolId): bool
+    {
+        if (!$protocolId)
+            return true;
+        try {
+            $pdo = DB::conn();
+            $stmt = $pdo->prepare('SELECT slug FROM protocols WHERE id = ?');
+            $stmt->execute([$protocolId]);
+            $slug = (string) $stmt->fetchColumn();
+            return in_array($slug, ['amnezia-wg-advanced', 'wireguard-standard', 'amnezia-wg'], true);
+        } catch (Exception $e) {
+            return true;
+        }
+    }
+
     /**
      * Delete client permanently
      */
-    public function delete(): bool {
+    public function delete(): bool
+    {
         if (!$this->data) {
             throw new Exception('Client not loaded');
         }
-        
+
         // First revoke to remove from server
         if ($this->data['status'] === 'active') {
             $this->revoke();
         }
-        
+
         // Delete from database
         $pdo = DB::conn();
         $stmt = $pdo->prepare('DELETE FROM vpn_clients WHERE id = ?');
         return $stmt->execute([$this->clientId]);
     }
-    
+
     /**
      * Remove client from server WireGuard configuration
      */
-    private static function removeClientFromServer(array $serverData, string $publicKey): void {
+    private static function removeClientFromServer(array $serverData, string $publicKey): void
+    {
         $containerName = $serverData['container_name'];
-        
+
         // First, remove using wg command (live removal)
         $removeCmd = sprintf(
             "docker exec -i %s wg set wg0 peer %s remove",
             $containerName,
             escapeshellarg($publicKey)
         );
-        
+
         self::executeServerCommand($serverData, $removeCmd, true);
-        
+
         // Then remove from wg0.conf file to make it persistent
         // Use a more reliable method: read, filter, write
         $readCmd = sprintf("docker exec -i %s cat /opt/amnezia/awg/wg0.conf", $containerName);
         $config = self::executeServerCommand($serverData, $readCmd, true);
-        
+
         // Parse and remove the peer section
         $newConfig = self::removePeerFromConfig($config, $publicKey);
-        
+
         // Write back to file
         $escapedConfig = str_replace("'", "'\\''", $newConfig);
         $writeCmd = sprintf(
@@ -439,35 +1103,36 @@ class VpnClient {
             $containerName,
             $escapedConfig
         );
-        
+
         self::executeServerCommand($serverData, $writeCmd, true);
-        
+
         // Save config
         $saveCmd = sprintf("docker exec -i %s wg-quick save wg0", $containerName);
         self::executeServerCommand($serverData, $saveCmd, true);
-        
+
         // Remove from clientsTable
         self::removeFromClientsTable($serverData, $publicKey);
     }
-    
+
     /**
      * Remove peer section from WireGuard config
      */
-    private static function removePeerFromConfig(string $config, string $publicKey): string {
+    private static function removePeerFromConfig(string $config, string $publicKey): string
+    {
         $lines = explode("\n", $config);
         $newLines = [];
         $inPeerBlock = false;
         $skipBlock = false;
-        
+
         foreach ($lines as $line) {
             $trimmed = trim($line);
-            
+
             // Start of new section
             if (strpos($trimmed, '[') === 0) {
                 $inPeerBlock = ($trimmed === '[Peer]');
                 $skipBlock = false;
             }
-            
+
             // Check if this peer block should be skipped
             if ($inPeerBlock && strpos($trimmed, 'PublicKey') === 0) {
                 $parts = explode('=', $line, 2);
@@ -478,7 +1143,7 @@ class VpnClient {
                     continue;
                 }
             }
-            
+
             // Skip lines in the block to be removed
             if ($skipBlock && $inPeerBlock) {
                 // Empty line ends the peer block
@@ -488,93 +1153,269 @@ class VpnClient {
                 }
                 continue;
             }
-            
+
             $newLines[] = $line;
         }
-        
+
         return implode("\n", $newLines);
     }
-    
+
     /**
      * Remove client from clientsTable
      */
-    private static function removeFromClientsTable(array $serverData, string $publicKey): void {
+    private static function removeFromClientsTable(array $serverData, string $publicKey): void
+    {
         $containerName = $serverData['container_name'];
-        
+
         // Read current table
         $cmd = sprintf("docker exec -i %s cat /opt/amnezia/awg/clientsTable 2>/dev/null", $containerName);
         $tableJson = self::executeServerCommand($serverData, $cmd, true);
         $table = json_decode(trim($tableJson), true);
-        
+
         if (!is_array($table)) {
             return;
         }
-        
+
         // Filter out the client
-        $table = array_filter($table, function($client) use ($publicKey) {
+        $table = array_filter($table, function ($client) use ($publicKey) {
             return ($client['clientId'] ?? '') !== $publicKey;
         });
-        
+
         // Re-index array
         $table = array_values($table);
-        
+
         // Save back
         $newTableJson = json_encode($table, JSON_PRETTY_PRINT);
         $escaped = addslashes($newTableJson);
         $updateCmd = sprintf("docker exec -i %s sh -c 'echo \"%s\" > /opt/amnezia/awg/clientsTable'", $containerName, $escaped);
         self::executeServerCommand($serverData, $updateCmd, true);
     }
-    
+
     /**
      * Get client data
      */
-    public function getData(): ?array {
+    public function getData(): ?array
+    {
         return $this->data;
     }
-    
+
     /**
      * Get configuration file content
      */
-    public function getConfig(): string {
-        return $this->data['config'] ?? '';
+    public function getConfig(): string
+    {
+        $config = $this->data['config'] ?? '';
+        // Decode escape sequences like \n that may be stored in database
+        return stripcslashes($config);
     }
-    
+
     /**
-     * Get QR code
+     * Regenerate and persist client configuration using current server container data.
+     * Useful when server was reinstalled/recreated and AWG params/keys changed.
      */
-    public function getQRCode(): string {
-        return $this->data['qr_code'] ?? '';
-    }
-    
-    /**
-     * Sync traffic statistics from server
-     */
-    public function syncStats(): bool {
+    public function regenerateConfigFromServer(bool $forceSyncServer = true): array
+    {
         if (!$this->data) {
             throw new Exception('Client not loaded');
         }
-        
+
+        $server = new VpnServer((int) $this->data['server_id']);
+        $serverData = $server->getData();
+        if (!$serverData) {
+            throw new Exception('Server not found');
+        }
+
+        $protocolId = (int) ($this->data['protocol_id'] ?? 0);
+        $protoRow = null;
+        if ($protocolId > 0) {
+            $pdo = DB::conn();
+            $stmt = $pdo->prepare('SELECT * FROM protocols WHERE id = ? LIMIT 1');
+            $stmt->execute([$protocolId]);
+            $protoRow = $stmt->fetch();
+        }
+        $slug = $protoRow['slug'] ?? '';
+        $isWireguard = in_array($slug, ['amnezia-wg-advanced', 'wireguard-standard', 'amnezia-wg'], true);
+
+        if (!$isWireguard) {
+            return ['success' => false, 'error' => 'not_wireguard_protocol', 'protocol_slug' => $slug];
+        }
+
+        if ($forceSyncServer) {
+            self::syncServerKeysFromContainer($server, $serverData);
+            $server->refresh();
+            $serverData = $server->getData();
+        }
+
+        $privateKey = (string) ($this->data['private_key'] ?? '');
+        $clientPublicKey = (string) ($this->data['public_key'] ?? '');
+        $clientIP = (string) ($this->data['client_ip'] ?? '');
+        if ($privateKey === '' || $clientIP === '') {
+            throw new Exception('Client keys or IP missing');
+        }
+
+        $awgParams = json_decode($serverData['awg_params'] ?? '{}', true) ?? [];
+        if (!is_array($awgParams)) {
+            $awgParams = [];
+        }
+
+        // If AWG params are missing (common after reinstall), fetch them directly from wg0.conf
+        // to avoid falling back to template defaults that will not match the server.
+        if ($slug === 'amnezia-wg-advanced') {
+            $needKeys = ['JC', 'JMIN', 'JMAX', 'S1', 'S2', 'H1', 'H2', 'H3', 'H4'];
+            $missing = false;
+            foreach ($needKeys as $k) {
+                if (!isset($awgParams[$k])) {
+                    $missing = true;
+                    break;
+                }
+            }
+
+            if ($missing) {
+                $containerName = $serverData['container_name'] ?? 'amnezia-awg';
+                $direct = self::extractAwgParamsFromWg0Conf($server, $containerName, '/opt/amnezia/awg/wg0.conf');
+                if (empty($direct)) {
+                    $direct = self::extractAwgParamsFromWg0Conf($server, $containerName, '/etc/wireguard/wg0.conf');
+                }
+
+                if (!empty($direct)) {
+                    $awgParams = $direct;
+
+                    // Persist to server row for future generations/diagnostics
+                    try {
+                        $pdo = DB::conn();
+                        $stmt = $pdo->prepare('UPDATE vpn_servers SET awg_params = ? WHERE id = ?');
+                        $stmt->execute([json_encode($awgParams), (int) ($serverData['id'] ?? 0)]);
+                    } catch (Exception $e) {
+                        // Best-effort only; regeneration can continue.
+                        error_log('Failed to persist AWG params during regeneration: ' . $e->getMessage());
+                    }
+                }
+            }
+
+            // Still missing? Refuse to overwrite config with template defaults.
+            foreach ($needKeys as $k) {
+                if (!isset($awgParams[$k])) {
+                    return [
+                        'success' => false,
+                        'error' => 'awg_params_missing',
+                        'protocol_slug' => $slug,
+                        'server_id' => (int) ($serverData['id'] ?? 0),
+                    ];
+                }
+            }
+        }
+
+        // Prefer per-peer PSK from wg dump (server may use different PSKs per peer)
+        $presharedKeyForConfig = (string) ($serverData['preshared_key'] ?? '');
+        try {
+            $containerName = $serverData['container_name'] ?? 'amnezia-awg';
+            $peerPsk = self::extractPeerPskFromWgDump($server, $containerName, $clientPublicKey);
+            if ($peerPsk !== null && $peerPsk !== '') {
+                $presharedKeyForConfig = $peerPsk;
+            }
+        } catch (Exception $e) {
+            // Best-effort; fallback to serverData['preshared_key']
+            error_log('Failed to extract peer PSK from wg dump: ' . $e->getMessage());
+        }
+
+        $vars = [
+            'private_key' => $privateKey,
+            'client_ip' => $clientIP,
+            'server_public_key' => (string) ($serverData['server_public_key'] ?? ''),
+            'preshared_key' => $presharedKeyForConfig,
+            'server_host' => (string) ($serverData['host'] ?? ''),
+            'server_port' => (string) ((int) ($serverData['vpn_port'] ?? 0)),
+            'dns_servers' => (string) ($serverData['dns_servers'] ?? '1.1.1.1, 1.0.0.1'),
+        ];
+
+        foreach (['JC', 'JMIN', 'JMAX', 'S1', 'S2', 'H1', 'H2', 'H3', 'H4'] as $key) {
+            if (isset($awgParams[$key])) {
+                $vars[$key] = $awgParams[$key];
+            }
+        }
+
+        if (!isset($vars['Jc']) && isset($vars['JC'])) {
+            $vars['Jc'] = (string) $vars['JC'];
+        }
+        if (!isset($vars['Jmin']) && isset($vars['JMIN'])) {
+            $vars['Jmin'] = (string) $vars['JMIN'];
+        }
+        if (!isset($vars['Jmax']) && isset($vars['JMAX'])) {
+            $vars['Jmax'] = (string) $vars['JMAX'];
+        }
+
+        if ($protoRow && !empty($protoRow['output_template'])) {
+            require_once __DIR__ . '/ProtocolService.php';
+            $config = ProtocolService::generateProtocolOutput($protoRow, $vars);
+        } else {
+            $config = self::buildClientConfig(
+                $privateKey,
+                $clientIP,
+                (string) ($serverData['server_public_key'] ?? ''),
+                $presharedKeyForConfig,
+                (string) ($serverData['host'] ?? ''),
+                (int) ($serverData['vpn_port'] ?? 0),
+                $awgParams
+            );
+        }
+
+        $qrCode = self::generateQRCode($config);
+
+        $pdo = DB::conn();
+        $stmt = $pdo->prepare('UPDATE vpn_clients SET config = ?, qr_code = ?, preshared_key = ? WHERE id = ?');
+        $stmt->execute([$config, $qrCode, $presharedKeyForConfig, (int) $this->clientId]);
+
+        // Refresh cached data
+        $this->load();
+
+        return [
+            'success' => true,
+            'client_id' => (int) $this->clientId,
+            'protocol_slug' => $slug,
+            'server_id' => (int) ($this->data['server_id'] ?? 0),
+            'awg_params' => $awgParams,
+            'peer_psk_source' => ($presharedKeyForConfig !== '' && $presharedKeyForConfig !== (string) ($serverData['preshared_key'] ?? '')) ? 'wg_dump' : 'server_row',
+        ];
+    }
+
+    /**
+     * Get QR code
+     */
+    public function getQRCode(): string
+    {
+        return $this->data['qr_code'] ?? '';
+    }
+
+    /**
+     * Sync traffic statistics from server
+     */
+    public function syncStats(): bool
+    {
+        if (!$this->data) {
+            throw new Exception('Client not loaded');
+        }
+
         $server = new VpnServer($this->data['server_id']);
         $serverData = $server->getData();
-        
+
         if (!$serverData || $serverData['status'] !== 'active') {
             return false;
         }
-        
+
         try {
             $stats = self::getClientStatsFromServer($serverData, $this->data['public_key']);
-            
+
             $pdo = DB::conn();
             $stmt = $pdo->prepare('
                 UPDATE vpn_clients 
                 SET bytes_sent = ?, bytes_received = ?, last_handshake = ?, last_sync_at = NOW()
                 WHERE id = ?
             ');
-            
-            $lastHandshake = $stats['last_handshake'] > 0 
-                ? date('Y-m-d H:i:s', $stats['last_handshake']) 
+
+            $lastHandshake = $stats['last_handshake'] > 0
+                ? date('Y-m-d H:i:s', $stats['last_handshake'])
                 : null;
-            
+
             return $stmt->execute([
                 $stats['bytes_sent'],
                 $stats['bytes_received'],
@@ -586,23 +1427,24 @@ class VpnClient {
             return false;
         }
     }
-    
+
     /**
      * Get client statistics from server
      */
-    private static function getClientStatsFromServer(array $serverData, string $publicKey): array {
+    private static function getClientStatsFromServer(array $serverData, string $publicKey): array
+    {
         $containerName = $serverData['container_name'];
-        
+
         // Get WireGuard interface stats
         $cmd = sprintf("docker exec -i %s wg show wg0 dump", $containerName);
         $output = self::executeServerCommand($serverData, $cmd, true);
-        
+
         $stats = [
             'bytes_sent' => 0,
             'bytes_received' => 0,
             'last_handshake' => 0
         ];
-        
+
         // Parse wg dump output
         // Format: public_key preshared_key endpoint allowed_ips latest_handshake transfer_rx transfer_tx persistent_keepalive
         // First line is server (private key), skip it
@@ -610,34 +1452,37 @@ class VpnClient {
         //              transfer_tx = bytes sent by server (received by client)
         $lines = explode("\n", trim($output));
         foreach ($lines as $line) {
-            if (empty($line)) continue;
-            
+            if (empty($line))
+                continue;
+
             $parts = preg_split('/\s+/', trim($line));
-            
+
             // Skip first line (server) - it has different format
-            if (count($parts) < 7) continue;
-            
+            if (count($parts) < 7)
+                continue;
+
             // Match by public key
             if ($parts[0] === $publicKey) {
-                $stats['last_handshake'] = (int)$parts[4];
-                $stats['bytes_sent'] = (int)$parts[5];      // transfer_rx - client sent
-                $stats['bytes_received'] = (int)$parts[6];  // transfer_tx - client received
+                $stats['last_handshake'] = (int) $parts[4];
+                $stats['bytes_sent'] = (int) $parts[5];      // transfer_rx - client sent
+                $stats['bytes_received'] = (int) $parts[6];  // transfer_tx - client received
                 break;
             }
         }
-        
+
         return $stats;
     }
-    
+
     /**
      * Sync stats for all active clients on a server
      */
-    public static function syncAllStatsForServer(int $serverId): int {
+    public static function syncAllStatsForServer(int $serverId): int
+    {
         $pdo = DB::conn();
         $stmt = $pdo->prepare('SELECT id FROM vpn_clients WHERE server_id = ? AND status = ?');
         $stmt->execute([$serverId, 'active']);
         $clientIds = $stmt->fetchAll(PDO::FETCH_COLUMN);
-        
+
         $synced = 0;
         foreach ($clientIds as $clientId) {
             try {
@@ -649,27 +1494,28 @@ class VpnClient {
                 error_log('Failed to sync stats for client ' . $clientId . ': ' . $e->getMessage());
             }
         }
-        
+
         return $synced;
     }
-    
+
     /**
      * Get human-readable traffic statistics
      */
-    public function getFormattedStats(): array {
+    public function getFormattedStats(): array
+    {
         if (!$this->data) {
             return ['sent' => 'N/A', 'received' => 'N/A', 'total' => 'N/A', 'last_seen' => 'Never'];
         }
-        
+
         $sent = $this->formatBytes($this->data['bytes_sent'] ?? 0);
         $received = $this->formatBytes($this->data['bytes_received'] ?? 0);
         $total = $this->formatBytes(($this->data['bytes_sent'] ?? 0) + ($this->data['bytes_received'] ?? 0));
-        
+
         $lastSeen = 'Never';
         if (!empty($this->data['last_handshake'])) {
             $lastHandshake = strtotime($this->data['last_handshake']);
             $diff = time() - $lastHandshake;
-            
+
             if ($diff < 300) {
                 $lastSeen = 'Online';
             } elseif ($diff < 3600) {
@@ -680,7 +1526,7 @@ class VpnClient {
                 $lastSeen = floor($diff / 86400) . ' days ago';
             }
         }
-        
+
         return [
             'sent' => $sent,
             'received' => $received,
@@ -689,15 +1535,16 @@ class VpnClient {
             'is_online' => !empty($this->data['last_handshake']) && (time() - strtotime($this->data['last_handshake'])) < 300
         ];
     }
-    
+
     /**
      * Format bytes to human-readable string (always in MB)
      */
-    private function formatBytes(int $bytes): string {
+    private function formatBytes(int $bytes): string
+    {
         $mb = $bytes / 1048576; // 1024 * 1024
         return number_format($mb, 2) . ' MB';
     }
-    
+
     /**
      * Set client expiration date
      * 
@@ -705,12 +1552,13 @@ class VpnClient {
      * @param string|null $expiresAt Expiration date (Y-m-d H:i:s) or null for never expires
      * @return bool Success
      */
-    public static function setExpiration(int $clientId, ?string $expiresAt): bool {
+    public static function setExpiration(int $clientId, ?string $expiresAt): bool
+    {
         $pdo = DB::conn();
         $stmt = $pdo->prepare('UPDATE vpn_clients SET expires_at = ? WHERE id = ?');
         return $stmt->execute([$expiresAt, $clientId]);
     }
-    
+
     /**
      * Extend client expiration by days
      * 
@@ -718,32 +1566,34 @@ class VpnClient {
      * @param int $days Days to extend
      * @return bool Success
      */
-    public static function extendExpiration(int $clientId, int $days): bool {
+    public static function extendExpiration(int $clientId, int $days): bool
+    {
         $pdo = DB::conn();
-        
+
         // Get current expiration
         $stmt = $pdo->prepare('SELECT expires_at FROM vpn_clients WHERE id = ?');
         $stmt->execute([$clientId]);
         $client = $stmt->fetch();
-        
+
         if (!$client) {
             return false;
         }
-        
+
         // Calculate new expiration from current or now
         $baseDate = $client['expires_at'] ? strtotime($client['expires_at']) : time();
         $newExpiration = date('Y-m-d H:i:s', strtotime("+{$days} days", $baseDate));
-        
+
         return self::setExpiration($clientId, $newExpiration);
     }
-    
+
     /**
      * Get clients expiring soon
      * 
      * @param int $days Check for clients expiring within N days
      * @return array List of expiring clients
      */
-    public static function getExpiringClients(int $days = 7): array {
+    public static function getExpiringClients(int $days = 7): array
+    {
         $pdo = DB::conn();
         $stmt = $pdo->prepare('
             SELECT c.*, s.name as server_name, s.host, u.name as user_name, u.email
@@ -759,13 +1609,14 @@ class VpnClient {
         $stmt->execute([$days]);
         return $stmt->fetchAll();
     }
-    
+
     /**
      * Get expired clients
      * 
      * @return array List of expired clients
      */
-    public static function getExpiredClients(): array {
+    public static function getExpiredClients(): array
+    {
         $pdo = DB::conn();
         $stmt = $pdo->query('
             SELECT c.*, s.name as server_name, s.host
@@ -778,16 +1629,17 @@ class VpnClient {
         ');
         return $stmt->fetchAll();
     }
-    
+
     /**
      * Disable expired clients automatically
      * 
      * @return int Number of clients disabled
      */
-    public static function disableExpiredClients(): int {
+    public static function disableExpiredClients(): int
+    {
         $expiredClients = self::getExpiredClients();
         $count = 0;
-        
+
         foreach ($expiredClients as $clientData) {
             try {
                 $client = new self($clientData['id']);
@@ -797,95 +1649,101 @@ class VpnClient {
                 error_log("Failed to disable expired client {$clientData['id']}: " . $e->getMessage());
             }
         }
-        
+
         return $count;
     }
-    
+
     /**
      * Check if client is expired
      * 
      * @return bool True if expired
      */
-    public function isExpired(): bool {
+    public function isExpired(): bool
+    {
         if (!$this->data) {
             return false;
         }
-        
+
         return $this->data['expires_at'] !== null && strtotime($this->data['expires_at']) <= time();
     }
-    
+
     /**
      * Get days until expiration
      * 
      * @return int|null Days until expiration (negative if expired, null if never expires)
      */
-    public function getDaysUntilExpiration(): ?int {
+    public function getDaysUntilExpiration(): ?int
+    {
         if (!$this->data || $this->data['expires_at'] === null) {
             return null;
         }
-        
+
         $diff = strtotime($this->data['expires_at']) - time();
-        return (int)floor($diff / 86400);
+        return (int) floor($diff / 86400);
     }
-    
+
     /**
      * Set traffic limit for client
      * 
      * @param int|null $limitBytes Traffic limit in bytes (NULL = unlimited)
      * @return bool Success
      */
-    public function setTrafficLimit(?int $limitBytes): bool {
+    public function setTrafficLimit(?int $limitBytes): bool
+    {
         if (!$this->data) {
             throw new Exception('Client not loaded');
         }
-        
+
         $pdo = DB::conn();
         $stmt = $pdo->prepare('UPDATE vpn_clients SET traffic_limit = ? WHERE id = ?');
         $result = $stmt->execute([$limitBytes, $this->clientId]);
-        
+
         if ($result) {
             $this->data['traffic_limit'] = $limitBytes;
         }
-        
+
         return $result;
     }
-    
+
     /**
      * Get total traffic used (sent + received)
      * 
      * @return int Total traffic in bytes
      */
-    public function getTotalTraffic(): int {
+    public function getTotalTraffic(): int
+    {
         if (!$this->data) {
             return 0;
         }
-        
-        return (int)($this->data['traffic_sent'] ?? 0) + (int)($this->data['traffic_received'] ?? 0);
+
+        return (int) ($this->data['traffic_sent'] ?? 0) + (int) ($this->data['traffic_received'] ?? 0);
     }
-    
+
     /**
      * Check if client has exceeded traffic limit
      * 
      * @return bool True if over limit
      */
-    public function isOverLimit(): bool {
+    public function isOverLimit(): bool
+    {
         if (!$this->data || $this->data['traffic_limit'] === null) {
             return false; // No limit set
         }
-        
+
         $totalTraffic = $this->getTotalTraffic();
-        return $totalTraffic >= (int)$this->data['traffic_limit'];
+        return $totalTraffic >= (int) $this->data['traffic_limit'];
     }
-    
+
     /**
      * Get traffic limit status
      * 
      * @return array Status info
      */
-    public function getTrafficLimitStatus(): array {
+    public function getTrafficLimitStatus(): array
+    {
         $totalTraffic = $this->getTotalTraffic();
         $limit = $this->data['traffic_limit'] ?? null;
-        
+
         return [
             'total_traffic' => $totalTraffic,
             'traffic_limit' => $limit,
@@ -895,13 +1753,14 @@ class VpnClient {
             'remaining' => $limit ? max(0, $limit - $totalTraffic) : null
         ];
     }
-    
+
     /**
      * Get all clients that exceeded their traffic limit
      * 
      * @return array List of client IDs over limit
      */
-    public static function getClientsOverLimit(): array {
+    public static function getClientsOverLimit(): array
+    {
         $pdo = DB::conn();
         $stmt = $pdo->query('
             SELECT id, name, traffic_sent, traffic_received, traffic_limit 
@@ -911,19 +1770,20 @@ class VpnClient {
             AND status = "active"
             ORDER BY id
         ');
-        
+
         return $stmt->fetchAll();
     }
-    
+
     /**
      * Disable all clients that exceeded their traffic limit
      * 
      * @return int Number of clients disabled
      */
-    public static function disableClientsOverLimit(): int {
+    public static function disableClientsOverLimit(): int
+    {
         $clients = self::getClientsOverLimit();
         $disabled = 0;
-        
+
         foreach ($clients as $clientData) {
             try {
                 $client = new VpnClient($clientData['id']);
@@ -935,7 +1795,7 @@ class VpnClient {
                 error_log("Failed to disable client {$clientData['id']}: " . $e->getMessage());
             }
         }
-        
+
         return $disabled;
     }
 }

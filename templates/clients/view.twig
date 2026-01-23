@@ -18,6 +18,7 @@
             {% endif %}
           </dd>
         </div>
+        <div><dt class="text-sm text-gray-600">Логин</dt><dd>{{ client.name|default('') }}</dd></div>
         <div><dt class="text-sm text-gray-600">{{ t('common.created') }}</dt><dd>{{ client.created_at }}</dd></div>
       </dl>
       <div class="flex gap-2">
@@ -148,6 +149,13 @@
     <h3 class="font-bold mb-4">QR Code</h3>
     <img src="{{ client.qr_code }}" alt="QR Code" class="mx-auto" style="max-width: 300px; width: 100%; height: auto;">
     <p class="text-sm text-gray-600 mt-2">Scan with Amnezia VPN app</p>
+  </div>
+  {% endif %}
+
+  {% if protocol_output and client.show_text_content %}
+  <div class="bg-white rounded shadow p-6 mt-6">
+    <h3 class="font-bold mb-4">{{ t('clients.connection_instructions') }}</h3>
+    <pre class="mb-0" style="white-space: pre-wrap;">{{ protocol_output }}</pre>
   </div>
   {% endif %}
 </div>

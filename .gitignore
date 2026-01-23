@@ -32,6 +32,21 @@ test_qr.svg
 *.swo
 *~
 
+# Local tooling / scratch
+.trae/
+scripts/_cycle_out/
+
+# Local exported client configs (do not commit)
+oleg*.conf
+adminnew*.conf
+________*.conf
+*fixed*.conf
+test_client_simple.conf
+
+# Local QR exports / screenshots
+*_QR.png
+photo_*.jpeg
+
 # Build artifacts
 dist/
 build/
@@ -42,3 +57,7 @@ backup/
 backups/
 TEST_RESULTS.md
 LDAP_FEATURE.md
+
+# Documentation and Tests
+tests/
+docs/

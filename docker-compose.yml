@@ -12,13 +12,13 @@ services:
       MYSQL_USER: ${DB_USERNAME:-amnezia}
       MYSQL_PASSWORD: ${DB_PASSWORD:-amnezia}
     ports:
-      - "3307:3306"
+      - "3309:3306"
     volumes:
       - db_data:/var/lib/mysql
       - ./migrations:/docker-entrypoint-initdb.d
       - ./my.cnf:/etc/mysql/conf.d/my.cnf:ro
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      test: [ "CMD", "mysqladmin", "ping", "-h", "localhost" ]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -32,6 +32,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      dind:
+        condition: service_started
     env_file:
       - .env
     environment:
@@ -42,10 +44,24 @@ services:
       DB_DATABASE: ${DB_DATABASE:-amnezia_panel}
       DB_USERNAME: ${DB_USERNAME:-amnezia}
       DB_PASSWORD: ${DB_PASSWORD:-amnezia}
+      DOCKER_HOST: tcp://dind:2375
     volumes:
       - ./:/var/www/html
     ports:
       - "8082:80"
 
+  dind:
+    image: docker:24-dind
+    container_name: amnezia-panel-dind
+    privileged: true
+    restart: unless-stopped
+    environment:
+      DOCKER_TLS_CERTDIR: ""
+    ports:
+      - "2375:2375"
+    volumes:
+      - dind_data:/var/lib/docker
+
 volumes:
   db_data:
+  dind_data:

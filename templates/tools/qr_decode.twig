@@ -1,0 +1,153 @@
+{% extends "layout.twig" %}
+{% block title %}QR Decode{% endblock %}
+{% block content %}
+<div class="max-w-3xl mx-auto px-4 py-8">
+  <h1 class="text-2xl font-bold mb-6">QR Decode</h1>
+  <div class="bg-white rounded shadow p-6 mb-6">
+    <h3 class="font-bold mb-4">Upload image</h3>
+    <input id="fileInput" type="file" accept="image/*" class="mb-4">
+    <canvas id="canvas" style="display:none"></canvas>
+    <div id="imagePreview" class="mb-4"></div>
+    <button id="decodeBtn" class="gradient-bg text-white px-4 py-2 rounded" onclick="decodeClick()">Decode</button>
+  </div>
+  <div class="bg-white rounded shadow p-6 mb-6">
+    <h3 class="font-bold mb-4">Paste payload</h3>
+    <textarea id="payloadInput" class="w-full border rounded p-2 mb-3" rows="4" placeholder="vless://... or base64url"></textarea>
+    <button id="parseBtn" class="bg-blue-600 text-white px-4 py-2 rounded">Parse</button>
+  </div>
+  <div class="bg-white rounded shadow p-6">
+    <h3 class="font-bold mb-4">Result</h3>
+    <pre id="result" class="text-sm whitespace-pre-wrap"></pre>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/pako@2.1.0/dist/pako.min.js"></script>
+<script src="https://unpkg.com/@zxing/library@0.18.6/umd/index.min.js"></script>
+<script>
+const fileInput = document.getElementById('fileInput');
+const decodeBtn = document.getElementById('decodeBtn');
+const canvas = document.getElementById('canvas');
+const preview = document.getElementById('imagePreview');
+const result = document.getElementById('result');
+const payloadInput = document.getElementById('payloadInput');
+const parseBtn = document.getElementById('parseBtn');
+
+fileInput.addEventListener('change', () => {
+  const f = fileInput.files[0];
+  if (!f) return;
+  const url = URL.createObjectURL(f);
+  const img = new Image();
+  img.onload = () => {
+    preview.innerHTML = '';
+    preview.appendChild(img);
+  };
+  img.src = url;
+});
+
+function b64urlToUint8(b64url) {
+  let s = b64url.replace(/-/g,'+').replace(/_/g,'/');
+  while (s.length % 4) s += '=';
+  const bin = atob(s);
+  const arr = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+  return arr;
+}
+
+function readBE32(arr, off) {
+  return (arr[off]<<24) | (arr[off+1]<<16) | (arr[off+2]<<8) | (arr[off+3]);
+}
+
+function parseAwgPayload(b64url) {
+  const bytes = b64urlToUint8(b64url);
+  if (bytes.length < 12) throw new Error('short payload');
+  const version = readBE32(bytes,0) >>> 0;
+  const compLen = readBE32(bytes,4) >>> 0;
+  const uncompLen = readBE32(bytes,8) >>> 0;
+  const data = bytes.slice(12);
+  const json = pako.inflate(data, {to:'string'});
+  const obj = JSON.parse(json);
+  return {version, compLen, uncompLen, json, obj};
+}
+
+function parseVless(uri) {
+  const u = new URL(uri);
+  const out = {
+    scheme: u.protocol.replace(':',''),
+    host: u.hostname,
+    port: u.port,
+    user: decodeURIComponent(u.username),
+    params: {}
+  };
+  const qs = u.searchParams;
+  qs.forEach((v,k)=>{ out.params[k]=v; });
+  return out;
+}
+
+function show(obj) {
+  result.textContent = typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2);
+}
+
+async function decodeClick() {
+  const f = fileInput.files[0];
+  if (!f) { alert('Choose image'); return; }
+  let img = preview.querySelector('img');
+  if (!img || !img.complete) {
+    const url = URL.createObjectURL(f);
+    img = new Image();
+    await new Promise((resolve, reject) => {
+      img.onload = resolve;
+      img.onerror = reject;
+      img.src = url;
+    });
+    preview.innerHTML = '';
+    preview.appendChild(img);
+  }
+  const w = img.naturalWidth || img.width;
+  const h = img.naturalHeight || img.height;
+  if (!w || !h) { show('Image has zero size'); return; }
+  const scale = Math.min(1, 1200 / Math.max(w, h));
+  canvas.width = Math.max(1, Math.floor(w * scale));
+  canvas.height = Math.max(1, Math.floor(h * scale));
+  const ctx = canvas.getContext('2d');
+  ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  const imageData = ctx.getImageData(0,0,canvas.width,canvas.height);
+  let text = '';
+  try {
+    const code = jsQR(imageData.data, imageData.width, imageData.height);
+    text = (code && code.data) ? code.data : '';
+  } catch (e) { text = ''; }
+  if (!text && window.ZXing && ZXing.BrowserQRCodeReader) {
+    try {
+      const reader = new ZXing.BrowserQRCodeReader();
+      const res = await reader.decodeFromImage(img);
+      text = res && res.text ? res.text : '';
+    } catch (e) { /* ignore */ }
+  }
+  if (!text) { show('No QR found'); return; }
+  payloadInput.value = text;
+  try {
+    if (text.startsWith('vless://')) {
+      show(parseVless(text));
+    } else {
+      show(parseAwgPayload(text));
+    }
+  } catch (e) { show('Parse error: ' + e.message); }
+}
+
+decodeBtn.addEventListener('click', decodeClick);
+
+parseBtn.addEventListener('click', () => {
+  const text = payloadInput.value.trim();
+  if (!text) { show('Empty'); return; }
+  try {
+    if (text.startsWith('vless://')) {
+      show(parseVless(text));
+    } else {
+      show(parseAwgPayload(text));
+    }
+  } catch (e) { show('Parse error: ' + e.message); }
+});
+</script>
+{% endblock %}

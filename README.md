@@ -4,11 +4,15 @@ Web-based management panel for Amnezia AWG (WireGuard) VPN servers.
 
 ## Features
 
-- VPN server deployment via SSH
+- VPN server deployment via SSH (Password or **SSH Key**)
 - **Import from existing VPN panels** (wg-easy, 3x-ui)
+- **Advanced Protocol Management** (WireGuard, AmneziaWG, OpenVPN, Shadowsocks, etc.)
+- **AI-powered Protocol Configuration** using OpenRouter (optional)
 - Client configuration management with **expiration dates**
 - **Traffic limits** for clients with automatic enforcement
 - **Server backup and restore** functionality
+- **Scenario Testing**: Define and test different VPN connection scenarios across protocols
+- **Advanced Log Management**: View, search, and manage system and container logs
 - Traffic statistics monitoring
 - QR code generation for mobile apps
 - Multi-language interface (English, Russian, Spanish, German, French, Chinese)
@@ -63,7 +67,10 @@ JWT_SECRET=your-secret-key-change-this
 ### Add VPN Server
 
 1. Servers → Add Server
-2. Enter: name, host IP, SSH port, username, password
+1. Servers → Add Server
+2. Enter: name, host IP, SSH port, username
+3. Choose authentication method: **Password** or **SSH Key**
+   - For SSH Key: Paste your private key (PEM/OpenSSH format)
 3. **(Optional) Enable import from existing panel:**
    - Check "Import from existing panel"
    - Select panel type (wg-easy or 3x-ui)
@@ -140,6 +147,30 @@ curl -X POST http://localhost:8082/api/servers/1/restore \
   -H "Authorization: Bearer <token>" \
   -d '{"backup_id": 123}'
 ```
+
+### Protocol Management
+
+Manage VPN protocols via **Settings → Protocols**:
+- Install/Uninstall protocols (WireGuard, AmneziaWG, OpenVPN, etc.)
+- Configure protocol settings (ports, transport, obfuscation)
+- **AI Assistant**: Use "Ask AI" to generate complex protocol configurations tailored to your needs (requires OpenRouter API key).
+
+### Scenario Testing & Logs
+
+**Scenario Testing**:
+- Create test scenarios to verify connectivity across different protocols and network conditions.
+- Run automated tests to ensure your VPN infrastructure is reliable.
+
+**Log Management**:
+- Centralized view of all system, container, and application logs.
+- Search and filter capabilities to quickly diagnose issues.
+
+### AI Assistant
+
+Configure OpenRouter API key in **Settings** to enable:
+- Auto-translation of the interface
+- AI-assisted protocol configuration
+- Intelligent troubleshooting suggestions
 
 ### Automatic Monitoring and Metrics Collection
 
@@ -284,6 +315,8 @@ inc/                  - Core classes
   JWT.php            - Token auth
   QrUtil.php         - QR code generation
   PanelImporter.php  - Import from wg-easy/3x-ui
+  InstallProtocolManager.php - Protocol management core
+  OpenRouterService.php - AI integration
 templates/           - Twig templates
 migrations/          - SQL migrations (executed in alphabetical order)
 ```

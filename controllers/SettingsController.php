@@ -13,11 +13,48 @@ class SettingsController {
         $stats = $this->getTranslationStats();
         $users = $this->getAllUsers();
         $apiKey = $this->getApiKey('openrouter');
-        
+
+        // LDAP data for embedded tab
+        $stmt = $this->pdo->query("SELECT * FROM ldap_configs WHERE id = 1");
+        $config = $stmt->fetch() ?: [];
+        $stmt = $this->pdo->query("SELECT * FROM ldap_group_mappings ORDER BY ldap_group");
+        $mappings = $stmt->fetchAll();
+
+        // Protocols data for embedded tab (new management)
+        $protocols = ProtocolService::getAllProtocolsWithStats();
+        $selectedId = isset($_GET['id']) ? (int)$_GET['id'] : null;
+        $isNew = isset($_GET['new']);
+        $editing = null;
+        if (!$isNew) {
+            if ($selectedId) {
+                try {
+                    $editing = ProtocolService::getProtocolWithDetails($selectedId);
+                } catch (Exception $e) {
+                    $editing = null;
+                }
+            }
+            if (!$editing && !empty($protocols)) {
+                $firstId = (int)($protocols[0]['id'] ?? 0);
+                if ($firstId) {
+                    try { $editing = ProtocolService::getProtocolWithDetails($firstId); } catch (Exception $e) { $editing = null; }
+                }
+            }
+        }
+        $definitionPretty = json_encode([], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+
         $data = [
             'translation_stats' => $stats,
             'users' => $users,
-            'openrouter_key' => $apiKey
+            'openrouter_key' => $apiKey,
+            // LDAP
+            'config' => $config,
+            'mappings' => $mappings,
+            // Protocols
+            'protocols' => $protocols,
+            'editing' => $editing,
+            'definition_json' => $definitionPretty,
+            'is_new' => $isNew,
+            'default_slug' => isset($editing['slug']) ? $editing['slug'] : (isset($protocols[0]['slug']) ? $protocols[0]['slug'] : 'amnezia-wg'),
         ];
         
         // Check for session messages
@@ -28,6 +65,15 @@ class SettingsController {
         if (isset($_SESSION['settings_error'])) {
             $data['error'] = $_SESSION['settings_error'];
             unset($_SESSION['settings_error']);
+        }
+        // Also pick up protocol messages if present
+        if (isset($_SESSION['protocol_success']) && !isset($data['success'])) {
+            $data['success'] = $_SESSION['protocol_success'];
+            unset($_SESSION['protocol_success']);
+        }
+        if (isset($_SESSION['protocol_error']) && !isset($data['error'])) {
+            $data['error'] = $_SESSION['protocol_error'];
+            unset($_SESSION['protocol_error']);
         }
         
         View::render('settings.twig', $data);
@@ -75,6 +121,29 @@ class SettingsController {
         $stmt->execute([$newHash, $user['id']]);
         
         $_SESSION['settings_success'] = 'Password changed successfully';
+        header('Location: /settings#profile');
+        exit;
+    }
+    
+    public function updateProfile() {
+        if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+            header('Location: /settings');
+            exit;
+        }
+        
+        $user = Auth::user();
+        $displayName = trim($_POST['display_name'] ?? '');
+        
+        if ($displayName === '') {
+            $_SESSION['settings_error'] = 'Display name cannot be empty';
+            header('Location: /settings#profile');
+            exit;
+        }
+        
+        $stmt = $this->pdo->prepare("UPDATE users SET display_name = ? WHERE id = ?");
+        $stmt->execute([$displayName, $user['id']]);
+        
+        $_SESSION['settings_success'] = 'Profile updated';
         header('Location: /settings#profile');
         exit;
     }
@@ -422,7 +491,7 @@ class SettingsController {
         ]);
         
         $_SESSION['settings_success'] = 'LDAP settings saved successfully';
-        header('Location: /settings/ldap');
+        header('Location: /settings#ldap');
         exit;
     }
     

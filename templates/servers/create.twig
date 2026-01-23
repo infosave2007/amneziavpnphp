@@ -3,43 +3,113 @@
 {% block content %}
 <div class="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8">
   <h1 class="text-3xl font-bold mb-8"><i class="fas fa-plus-circle text-purple-600"></i> Add New Server</h1>
-  {% if error %}<div class="mb-4 bg-red-50 border border-red-400 text-red-700 px-4 py-3 rounded">{{ error }}</div>{% endif %}
+  {% if error %}
+    <div class="mb-4 bg-red-50 border border-red-400 text-red-700 px-4 py-3 rounded">{{ error }}</div>
+  {% endif %}
   <form method="POST" enctype="multipart/form-data" class="bg-white shadow rounded-lg p-6 space-y-6">
-    <div><label class="block text-sm font-medium text-gray-700">Server Name</label><input name="name" required class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md" placeholder="US Server 1"></div>
-    <div><label class="block text-sm font-medium text-gray-700">Host IP/Domain</label><input name="host" required class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md" placeholder="123.456.789.0"></div>
-    <div><label class="block text-sm font-medium text-gray-700">SSH Port</label><input name="port" type="number" value="22" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md"></div>
-    <div><label class="block text-sm font-medium text-gray-700">SSH Username</label><input name="username" value="root" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md"></div>
-    <div><label class="block text-sm font-medium text-gray-700">SSH Password</label><input name="password" type="password" required class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md"></div>
-    
-    <!-- Import from existing panel -->
-    <div class="border-t pt-6">
-      <div class="flex items-center mb-4">
-        <input type="checkbox" id="enableImport" name="enable_import" class="h-4 w-4 text-purple-600 rounded" onchange="toggleImportFields()">
-        <label for="enableImport" class="ml-2 text-sm font-medium text-gray-700">
-          {{ t('servers.import_from_panel') }}
+    <div>
+      <label class="block text-sm font-medium text-gray-700">{{ t('servers.creation_mode') }}</label>
+      <div class="mt-2 flex items-center gap-6">
+        <label class="inline-flex items-center">
+          <input type="radio" name="creation_mode" value="manual" class="text-purple-600" {% if selected_mode|default('manual') == 'manual' %}checked{% endif %}>
+          <span class="ml-2 text-sm text-gray-700">{{ t('servers.creation_mode_manual') }}</span>
+        </label>
+        <label class="inline-flex items-center">
+          <input type="radio" name="creation_mode" value="backup" class="text-purple-600" {% if selected_mode == 'backup' %}checked{% endif %}>
+          <span class="ml-2 text-sm text-gray-700">{{ t('servers.creation_mode_backup') }}</span>
         </label>
       </div>
-      
-      <div id="importFields" style="display: none;" class="space-y-4 pl-6 border-l-2 border-purple-200">
+    </div>
+
+    <div id="manualSection" class="space-y-4">
+      <div>
+        <label class="block text-sm font-medium text-gray-700">Server Name</label>
+        <input name="name" data-field-manual required class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md" placeholder="US Server 1" value="{{ form_data.name ?? '' }}">
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700">Installation Protocol</label>
+        {% set selectedProtocol = form_data.install_protocol ?? default_protocol %}
+        <select name="install_protocol" data-field-manual class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+          {% for protocol in protocols %}
+            <option value="{{ protocol.slug }}" {% if protocol.slug == selectedProtocol %}selected{% endif %}>{{ protocol.name }}</option>
+          {% endfor %}
+        </select>
+        <p id="protocolDescription" class="mt-1 text-xs text-gray-500"></p>
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700">Host IP/Domain</label>
+        <input name="host" data-field-manual required class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md" placeholder="123.456.789.0" value="{{ form_data.host ?? '' }}">
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700">SSH Port</label>
+        <input name="port" data-field-manual type="number" value="{{ form_data.port ?? 22 }}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+      </div>
+      <div>
+        <label class="block text-sm font-medium text-gray-700">SSH Username</label>
+        <input name="username" data-field-manual value="{{ form_data.username ?? 'root' }}" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+      </div>
+      <div class="space-y-4">
         <div>
-          <label class="block text-sm font-medium text-gray-700">{{ t('servers.select_panel_type') }}</label>
-          <select name="panel_type" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
-            <option value="">-- {{ t('servers.select_panel_type') }} --</option>
-            <option value="wg-easy">{{ t('servers.panel_type_wgeasy') }}</option>
-            <option value="3x-ui">{{ t('servers.panel_type_3xui') }}</option>
-          </select>
+          <label class="block text-sm font-medium text-gray-700">Authentication Method</label>
+          <div class="mt-2 flex items-center gap-6">
+            <label class="inline-flex items-center">
+              <input type="radio" name="auth_method" value="password" class="text-purple-600" checked onchange="toggleAuthMethod()">
+              <span class="ml-2 text-sm text-gray-700">Password</span>
+            </label>
+            <label class="inline-flex items-center">
+              <input type="radio" name="auth_method" value="ssh_key" class="text-purple-600" onchange="toggleAuthMethod()">
+              <span class="ml-2 text-sm text-gray-700">SSH Key</span>
+            </label>
+          </div>
         </div>
-        
-        <div>
-          <label class="block text-sm font-medium text-gray-700">{{ t('servers.upload_backup_file') }}</label>
-          <input type="file" name="backup_file" accept=".json" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
-          <p class="mt-1 text-xs text-gray-500">
-            wg-easy: db.json | 3x-ui: export.json
-          </p>
+
+        <div id="authPassword">
+          <label class="block text-sm font-medium text-gray-700">SSH Password</label>
+          <input name="password" data-field-manual type="password" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md">
+        </div>
+
+        <div id="authSshKey" style="display: none;">
+          <label class="block text-sm font-medium text-gray-700">SSH Private Key</label>
+          <textarea name="ssh_key" data-field-manual rows="6" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-xs" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----..."></textarea>
+          <p class="mt-1 text-xs text-gray-500">Paste your private key (PEM or OpenSSH format)</p>
         </div>
       </div>
     </div>
-    
+
+    <div id="backupSection" class="space-y-6" style="display: none;">
+      <input type="hidden" name="backup_token" value="{{ form_data.backup_token ?? '' }}">
+
+      <div>
+        <label class="block text-sm font-medium text-gray-700">{{ t('servers.backup_upload_type') }}</label>
+        <select name="backup_upload_type" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md" data-field-backup>
+          <option value="auto" {% if form_data.backup_upload_type|default('auto') == 'auto' %}selected{% endif %}>{{ t('servers.backup_type_auto') }}</option>
+          <option value="amnezia_app" {% if form_data.backup_upload_type|default('auto') == 'amnezia_app' %}selected{% endif %}>{{ t('servers.backup_type_amnezia') }}</option>
+          <option value="panel_backup" {% if form_data.backup_upload_type|default('auto') == 'panel_backup' %}selected{% endif %}>{{ t('servers.backup_type_panel') }}</option>
+        </select>
+      </div>
+
+      <div>
+        <label class="block text-sm font-medium text-gray-700">{{ t('servers.upload_backup_file') }}</label>
+        <input type="file" name="backup_upload" accept=".backup,.json" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md" data-field-backup>
+        <p class="mt-1 text-xs text-gray-500">{{ t('servers.backup_upload_hint') }}</p>
+      </div>
+
+      {% if form_data.uploaded_servers is defined and form_data.uploaded_servers %}
+        <div class="border-t pt-6 space-y-2">
+          <label class="block text-sm font-medium text-gray-700">{{ t('servers.backup_server_entry') }}</label>
+          <select name="backup_server_index" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md" data-field-backup>
+            {% for server in form_data.uploaded_servers %}
+              {% set option_host = server.host is defined and server.host is not empty ? server.host : t('common.na') %}
+              {% set option_clients = server.client_count is defined ? server.client_count : t('common.na') %}
+              <option value="{{ server.index }}" {% if form_data.backup_server_index|default('') == (server.index ~ '') %}selected{% endif %}>
+                {{ server.label }} — {{ t('servers.backup_summary_host') }}: {{ option_host }}, {{ t('servers.backup_summary_clients') }}: {{ option_clients }}
+              </option>
+            {% endfor %}
+          </select>
+        </div>
+      {% endif %}
+    </div>
+
     <button type="submit" class="w-full gradient-bg text-white py-2 px-4 rounded-md hover:opacity-90">
       <i class="fas fa-save mr-2"></i>Create Server
     </button>
@@ -47,11 +117,90 @@
 </div>
 
 <script>
-function toggleImportFields() {
-  const checkbox = document.getElementById('enableImport');
-  const fields = document.getElementById('importFields');
-  fields.style.display = checkbox.checked ? 'block' : 'none';
+const modeRadios = Array.prototype.slice.call(document.querySelectorAll('input[name="creation_mode"]'));
+const manualSection = document.getElementById('manualSection');
+const backupSection = document.getElementById('backupSection');
+const manualFields = Array.prototype.slice.call(document.querySelectorAll('[data-field-manual]'));
+const backupFields = Array.prototype.slice.call(document.querySelectorAll('[data-field-backup]'));
+const initialMode = {{ selected_mode|default('manual')|json_encode|raw }};
+
+function setFieldsState(mode) {
+  manualFields.forEach(el => {
+    if (!el) return;
+    el.disabled = mode !== 'manual';
+  });
+  backupFields.forEach(el => {
+    if (!el) return;
+    el.disabled = mode !== 'backup';
+  });
 }
+
+function switchMode() {
+  const selectedRadio = document.querySelector('input[name="creation_mode"]:checked');
+  const mode = selectedRadio ? selectedRadio.value : 'manual';
+  if (manualSection) {
+    manualSection.style.display = mode === 'manual' ? 'block' : 'none';
+  }
+  if (backupSection) {
+    backupSection.style.display = mode === 'backup' ? 'block' : 'none';
+  }
+  setFieldsState(mode);
+}
+
+modeRadios.forEach(function (radio) {
+  radio.addEventListener('change', switchMode);
+});
+
+const initialModeRadio = document.querySelector(`input[name="creation_mode"][value="${initialMode}"]`);
+if (initialModeRadio) {
+    initialModeRadio.checked = true;
+}
+switchMode();
+
+{% set protocol_map = {} %}
+{% for protocol in protocols %}
+  {% set protocol_map = protocol_map | merge({ (protocol.slug): (protocol.description ?? '') }) %}
+{% endfor %}
+const protocolDescriptions = {{ protocol_map | json_encode | raw }};
+const protocolDescriptionEl = document.getElementById('protocolDescription');
+const protocolSelect = document.querySelector('select[name="install_protocol"]');
+
+function updateProtocolDescription() {
+  if (!protocolSelect || !protocolDescriptionEl) return;
+  const description = protocolDescriptions[protocolSelect.value] || '';
+  protocolDescriptionEl.textContent = description;
+  protocolDescriptionEl.style.display = description ? 'block' : 'none';
+}
+
+function toggleAuthMethod() {
+  const method = document.querySelector('input[name="auth_method"]:checked').value;
+  const passwordSection = document.getElementById('authPassword');
+  const keySection = document.getElementById('authSshKey');
+  const passwordInput = passwordSection.querySelector('input');
+  const keyInput = keySection.querySelector('textarea');
+
+  if (method === 'password') {
+    passwordSection.style.display = 'block';
+    keySection.style.display = 'none';
+    passwordInput.required = true;
+    keyInput.required = false;
+    keyInput.value = ''; // Clear key if switching back to password to avoid ambiguity
+  } else {
+    passwordSection.style.display = 'none';
+    keySection.style.display = 'block';
+    passwordInput.required = false;
+    passwordInput.value = ''; // Clear password
+    keyInput.required = true;
+  }
+}
+
+if (protocolSelect) {
+  protocolSelect.addEventListener('change', updateProtocolDescription);
+  updateProtocolDescription();
+}
+
+// Initialize auth method state
+toggleAuthMethod();
 </script>
 
 {% endblock %}

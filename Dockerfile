@@ -14,6 +14,7 @@ RUN apt-get update && apt-get install -y \
     qrencode \
     cron \
     libldap2-dev \
+    docker.io \
     && docker-php-ext-configure ldap --with-libdir=lib/x86_64-linux-gnu/ \
     && docker-php-ext-install pdo_mysql mbstring exif pcntl bcmath gd ldap \
     && a2enmod rewrite \
@@ -56,6 +57,14 @@ RUN chmod +x /var/www/html/bin/monitor_metrics.sh
 # Create startup script
 RUN echo '#!/bin/bash\n\
 service cron start\n\
+# Ensure www-data can talk to host docker socket if mounted\n\
+if [ -S /var/run/docker.sock ]; then\n\
+  SOCK_GID=$(stat -c %g /var/run/docker.sock)\n\
+  if ! getent group docker >/dev/null; then\n\
+    groupadd -g "$SOCK_GID" docker || true\n\
+  fi\n\
+  usermod -aG docker www-data || true\n\
+fi\n\
 # Start metrics collector on container startup\n\
 /bin/bash /var/www/html/bin/monitor_metrics.sh\n\
 apache2-foreground' > /start.sh \
