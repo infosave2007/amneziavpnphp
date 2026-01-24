@@ -200,7 +200,7 @@ class VpnClient
                 if (isset($extras['result']) && is_array($extras['result'])) {
                     $extras = array_merge($extras, $extras['result']);
                 }
-                
+
                 foreach ($extras as $k => $v) {
                     if (is_scalar($v)) {
                         // Preserve uppercase for AWG obfuscation parameters
@@ -834,7 +834,7 @@ class VpnClient
     /**
      * Add client to server using wg set (more reliable than syncconf)
      */
-    private static function addClientToServer(array $serverData, string $publicKey, string $clientIP): void
+    public static function addClientToServer(array $serverData, string $publicKey, string $clientIP): void
     {
         $containerName = $serverData['container_name'];
         $presharedKey = $serverData['preshared_key'];
@@ -936,6 +936,36 @@ class VpnClient
         require_once __DIR__ . '/QrUtil.php';
 
         try {
+            // Check for X-Ray VLESS
+            if (strpos($config, 'vless://') === 0) {
+                // Parse VLESS URI
+                $parsed = parse_url($config);
+                // Allow missing user (UUID) and port for partial configs
+                if ($parsed && isset($parsed['host'])) {
+                    $host = $parsed['host'];
+                    $port = isset($parsed['port']) ? (int) $parsed['port'] : 443;
+                    $clientId = $parsed['user'] ?? '';
+                    $fragment = $parsed['fragment'] ?? '';
+
+                    parse_str($parsed['query'] ?? '', $query);
+
+                    $reality = null;
+                    if (($query['security'] ?? '') === 'reality') {
+                        $reality = [
+                            'publicKey' => $query['pbk'] ?? '',
+                            'serverName' => $query['sni'] ?? '',
+                            'shortId' => $query['sid'] ?? '',
+                            'fingerprint' => $query['fp'] ?? 'chrome'
+                        ];
+                    }
+
+                    // Use QrUtil to encode correct X-Ray payload
+                    $payloadXray = QrUtil::encodeXrayPayload($host, $port, $clientId, $fragment, $reality);
+                    return QrUtil::pngBase64($payloadXray);
+                }
+            }
+
+            // Fallback for WireGuard / default
             // Use old Amnezia format with Qt/QDataStream encoding
             $payloadOld = QrUtil::encodeOldPayloadFromConf($config);
             $dataUri = QrUtil::pngBase64($payloadOld);
