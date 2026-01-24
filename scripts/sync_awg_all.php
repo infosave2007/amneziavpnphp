@@ -98,6 +98,10 @@ try {
 
     foreach ($clients as $client) {
         $pub = $client['public_key'];
+        if (empty($pub)) {
+            echo "Skipping client {$client['id']} (Empty Public Key)\n";
+            continue;
+        }
         $psk = $client['preshared_key'];
         $ip = $client['client_ip'];
         $allowed = $client['allowed_ips'] ?? "$ip/32"; // Fallback to IP/32
@@ -110,8 +114,8 @@ try {
     }
 
     // 5. Write Config
-    // Use host path if possible for safety
-    $hostConfPath = '/opt/amnezia/amnezia-awg/wg0.conf';
+    // Use host path that matches container volume (-v /opt/amnezia/awg:/opt/amnezia/awg)
+    $hostConfPath = '/opt/amnezia/awg/wg0.conf';
 
     $escaped = addslashes($conf);
     $server->executeCommand("echo \"$escaped\" > $hostConfPath", true);
