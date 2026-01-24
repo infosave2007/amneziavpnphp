@@ -439,8 +439,8 @@ class QrUtil
                 [
                     'xray' => [
                         'isThirdPartyConfig' => true,
-                        // Wrap the raw VLESS URI in a "config" field inside last_config
-                        'last_config' => json_encode(['config' => $rawConfig], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+                        // Pass raw VLESS URI directly, without JSON wrapper
+                        'last_config' => $rawConfig,
                         'port' => (string) $port,
                         'transport_proto' => 'tcp'
                     ],
