@@ -409,38 +409,66 @@ class QrUtil
         return json_encode($decoded, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
     }
 
-    public static function encodeXrayPayload(string $host, int $port, string $clientId, string $description = '', ?array $reality = null, string $rawConfig = ''): string
+    public static function encodeXrayPayload(string $host, int $port, string $clientId, string $description = '', ?array $reality = null, string $rawConfig = '', string $flow = ''): string
     {
         $desc = $description !== '' ? $description : self::resolveServerDescription($host);
 
-        // Instead of generating a JSON config, we wrap the raw VLESS URI in a "config" field.
-        // This matches how WireGuard configs are handled in master branch and is likely what Amnezia expects.
-        // If rawConfig is not provided, we reconstruct a basic VLESS URI (fallback)
-        if (empty($rawConfig)) {
-            // Basic reconstruction if needed, but we should pass valid rawConfig from VpnClient
-            $security = ($reality && isset($reality['publicKey']) && $reality['publicKey'] !== '') ? 'reality' : 'none';
-            $type = 'tcp';
-            $flow = ($security === 'reality') ? 'xtls-rprx-vision' : '';
+        // Construct full Client XRay config (Amnezia native format expects this structure)
+        $outbound = [
+            'protocol' => 'vless',
+            'settings' => [
+                'vnext' => [
+                    [
+                        'address' => $host,
+                        'port' => $port,
+                        'users' => [
+                            [
+                                'id' => $clientId,
+                                'encryption' => 'none'
+                            ]
+                        ]
+                    ]
+                ]
+            ],
+            'streamSettings' => [
+                'network' => 'tcp',
+                'security' => ($reality ? 'reality' : 'none')
+            ]
+        ];
 
-            $query = http_build_query([
-                'security' => $security,
-                'type' => $type,
-                'flow' => $flow,
-                'sni' => $reality['serverName'] ?? '',
-                'pbk' => $reality['publicKey'] ?? '',
-                'fp' => $reality['fingerprint'] ?? 'chrome',
-                'sid' => $reality['shortId'] ?? ''
-            ]);
-            $rawConfig = "vless://$clientId@$host:$port?$query";
+        if ($flow !== '') {
+            $outbound['settings']['vnext'][0]['users'][0]['flow'] = $flow;
         }
+
+        if ($reality) {
+            $outbound['streamSettings']['realitySettings'] = [
+                'fingerprint' => $reality['fingerprint'] ?? 'chrome',
+                'serverName' => $reality['serverName'] ?? '',
+                'publicKey' => $reality['publicKey'] ?? '',
+                'shortId' => $reality['shortId'] ?? '',
+                'spiderX' => ''
+            ];
+        }
+
+        $fullConfig = [
+            'log' => ['loglevel' => 'warning'],
+            'inbounds' => [
+                [
+                    'listen' => '127.0.0.1',
+                    'port' => 10808,
+                    'protocol' => 'socks',
+                    'settings' => ['udp' => true]
+                ]
+            ],
+            'outbounds' => [$outbound]
+        ];
 
         $envelope = [
             'containers' => [
                 [
                     'xray' => [
-                        'isThirdPartyConfig' => true,
-                        // Pass raw VLESS URI directly, without JSON wrapper
-                        'last_config' => $rawConfig,
+                        // No isThirdPartyConfig flag - treats as native container
+                        'last_config' => json_encode($fullConfig, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT),
                         'port' => (string) $port,
                         'transport_proto' => 'tcp'
                     ],

@@ -970,6 +970,7 @@ class VpnClient
                     $fragment = $parsed['fragment'] ?? '';
 
                     parse_str($parsed['query'] ?? '', $query);
+                    $flow = $query['flow'] ?? '';
 
                     $reality = null;
                     if (($query['security'] ?? '') === 'reality') {
@@ -981,8 +982,8 @@ class VpnClient
                         ];
                     }
 
-                    // Use QrUtil to encode correct X-Ray payload
-                    $payloadXray = QrUtil::encodeXrayPayload($host, $port, $clientId, $fragment, $reality, $config);
+                    // Use QrUtil to encode correct X-Ray payload (Native Amnezia Client Config)
+                    $payloadXray = QrUtil::encodeXrayPayload($host, $port, $clientId, $fragment, $reality, $config, $flow);
                     return QrUtil::pngBase64($payloadXray);
                 }
             }
