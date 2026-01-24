@@ -348,7 +348,7 @@
             <a href="/clients/{{ client.id }}" class="text-purple-600 hover:text-purple-800 mr-2">{{ t('servers.view') }}</a>
             {% if client.status == 'active' %}
               <form method="POST" action="/clients/{{ client.id }}/revoke" style="display:inline;">
-                <button type="submit" class="text-orange-600 hover:text-orange-800 mr-2" onclick="return confirm('{{ t('clients.revoke_confirm') }}')">{{ t('clients.revoke') }}</button>
+                <button type="button" class="text-orange-600 hover:text-orange-800 mr-2" onclick="confirmAction(this, '{{ t('clients.revoke_confirm') }}')">{{ t('clients.revoke') }}</button>
               </form>
             {% else %}
               <form method="POST" action="/clients/{{ client.id }}/restore" style="display:inline;">
@@ -356,7 +356,7 @@
               </form>
             {% endif %}
             <form method="POST" action="/clients/{{ client.id }}/delete" style="display:inline;">
-              <button type="submit" class="text-red-600 hover:text-red-800" onclick="return confirm('{{ t('clients.delete_confirm') }}')">{{ t('clients.delete') }}</button>
+              <button type="button" class="text-red-600 hover:text-red-800" onclick="confirmAction(this, '{{ t('clients.delete_confirm') }}')">{{ t('clients.delete') }}</button>
             </form>
           </td>
         </tr>
@@ -370,6 +370,12 @@
 </div>
 
 <script>
+async function confirmAction(btn, message) {
+  if (await showConfirmModal(message)) {
+    btn.closest('form').submit();
+  }
+}
+
 function toggleExpirationInput() {
   const select = document.getElementById('expirationSelect');
   const input = document.getElementById('expirationSeconds');

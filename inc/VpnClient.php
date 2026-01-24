@@ -1440,6 +1440,49 @@ class VpnClient
     }
 
     /**
+     * Get XRay client stats
+     */
+    private static function getXrayStats(array $serverData, string $clientId): array
+    {
+        $stats = [
+            'bytes_sent' => 0,
+            'bytes_received' => 0,
+            'last_handshake' => 0 // XRay stats API does not provide handshake time
+        ];
+
+        $containerName = $serverData['container_name'] ?? 'amnezia-xray';
+
+        // Command to query stats
+        // We query by email, which should be equal to client ID (UUID)
+        $cmd = sprintf(
+            "docker exec -i %s xray api statsquery --server=127.0.0.1:10085 --pattern 'user>>>%s>>>traffic>>>' 2>/dev/null",
+            escapeshellarg($containerName),
+            escapeshellarg($clientId)
+        );
+
+        $output = self::executeServerCommand($serverData, $cmd, true);
+
+        if (empty($output)) {
+            return $stats;
+        }
+
+        // Output format example:
+        // user>>>uuid>>>traffic>>>uplink: 1024
+        // user>>>uuid>>>traffic>>>downlink: 2048
+
+        $lines = explode("\n", trim($output));
+        foreach ($lines as $line) {
+            if (preg_match('/user>>>.+>>>traffic>>>uplink:\s*(\d+)/', $line, $m)) {
+                $stats['bytes_sent'] = (int) $m[1];
+            } elseif (preg_match('/user>>>.+>>>traffic>>>downlink:\s*(\d+)/', $line, $m)) {
+                $stats['bytes_received'] = (int) $m[1];
+            }
+        }
+
+        return $stats;
+    }
+
+    /**
      * Sync traffic statistics from server
      */
     public function syncStats(): bool
@@ -1456,7 +1499,33 @@ class VpnClient
         }
 
         try {
-            $stats = self::getClientStatsFromServer($serverData, $this->data['public_key']);
+            // XRay stats logic
+            $stats = [];
+
+            // Heuristic: if container name contains 'xray' or protocol slug suggests xray
+            $containerName = $serverData['container_name'] ?? '';
+            // Or better: try to detect protocol from config if container name is vague (but usually amnezia-xray)
+
+            if (strpos($containerName, 'xray') !== false) {
+                $uuid = null;
+                // Try to find UUID in config
+                // 1. Check for JSON format (server.json style or subsets)
+                if (preg_match('/"id":\s*"([0-9a-fA-F-]{36})"/', $this->data['config'] ?? '', $m)) {
+                    $uuid = $m[1];
+                }
+                // 2. Check for VLESS URI
+                elseif (preg_match('/vless:\/\/([0-9a-fA-F-]{36})@/', $this->data['config'] ?? '', $m)) {
+                    $uuid = $m[1];
+                }
+
+                if ($uuid) {
+                    $stats = self::getXrayStats($serverData, $uuid);
+                }
+            }
+
+            if (empty($stats)) {
+                $stats = self::getClientStatsFromServer($serverData, $this->data['public_key']);
+            }
 
             $pdo = DB::conn();
             $stmt = $pdo->prepare('
