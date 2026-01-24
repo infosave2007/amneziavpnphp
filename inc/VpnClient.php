@@ -117,11 +117,20 @@ class VpnClient
 
 
             // Add AWG parameters (use UPPERCASE keys as extracted from container)
+            // Normalize AWG params keys case-insensitively
+            $cleanAwgParams = [];
+            if (is_array($awgParams)) {
+                foreach ($awgParams as $k => $v) {
+                    $cleanAwgParams[strtoupper($k)] = $v;
+                }
+            }
+
+            // Add AWG parameters (use UPPERCASE keys internal logic)
             foreach (['JC', 'JMIN', 'JMAX', 'S1', 'S2', 'H1', 'H2', 'H3', 'H4'] as $key) {
-                if (isset($awgParams[$key])) {
-                    $vars[$key] = $awgParams[$key];
+                if (isset($cleanAwgParams[$key])) {
+                    $vars[$key] = $cleanAwgParams[$key];
                 } else {
-                    // Default values for AWG params
+                    // Default values for AWG params (Fallback only)
                     $defaults = [
                         'JC' => 5,
                         'JMIN' => 100,
@@ -1507,19 +1516,11 @@ class VpnClient
             // Or better: try to detect protocol from config if container name is vague (but usually amnezia-xray)
 
             if (strpos($containerName, 'xray') !== false) {
-                $uuid = null;
-                // Try to find UUID in config
-                // 1. Check for JSON format (server.json style or subsets)
-                if (preg_match('/"id":\s*"([0-9a-fA-F-]{36})"/', $this->data['config'] ?? '', $m)) {
-                    $uuid = $m[1];
-                }
-                // 2. Check for VLESS URI
-                elseif (preg_match('/vless:\/\/([0-9a-fA-F-]{36})@/', $this->data['config'] ?? '', $m)) {
-                    $uuid = $m[1];
-                }
+                // Use client Name (Login) as identifier strictly requested by user
+                $identifier = $this->data['name'] ?? null;
 
-                if ($uuid) {
-                    $stats = self::getXrayStats($serverData, $uuid);
+                if ($identifier) {
+                    $stats = self::getXrayStats($serverData, $identifier);
                 }
             }
 

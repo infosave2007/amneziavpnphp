@@ -1200,7 +1200,8 @@ class InstallProtocolManager
         }
 
         // Add client
-        $newClient = ['id' => $clientId, 'email' => $clientId];
+        $email = !empty($options['login']) ? $options['login'] : $clientId;
+        $newClient = ['id' => $clientId, 'email' => $email];
 
         // Detect flow from other clients or default
         $flow = 'xtls-rprx-vision'; // Default for Reality
