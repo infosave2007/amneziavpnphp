@@ -264,7 +264,8 @@ class VpnClient
                                 if (is_array($clients) && !empty($clients)) {
                                     $cid = $clients[0]['id'] ?? null;
                                     if (is_string($cid) && $cid !== '' && empty($vars['client_id'])) {
-                                        $vars['client_id'] = $cid;
+                                        // $vars['client_id'] = $cid; 
+                                        // DO NOT reuse existing ID. We want to create a NEW client.
                                     }
                                 }
                                 $stream = $inbounds[0]['streamSettings'] ?? [];
@@ -388,7 +389,10 @@ class VpnClient
             }
 
             // Ensure client_id (UUID) for X-Ray
-            if (empty($vars['client_id']) && (stripos($slug, 'xray') !== false || stripos($slug, 'vless') !== false)) {
+            if (stripos($slug, 'xray') !== false || stripos($slug, 'vless') !== false) {
+                // Force clear any pre-existing ID from extras
+                unset($vars['client_id']);
+
                 $data = random_bytes(16);
                 $data[6] = chr(ord($data[6]) & 0x0f | 0x40);
                 $data[8] = chr(ord($data[8]) & 0x3f | 0x80);
@@ -400,12 +404,16 @@ class VpnClient
                 // We pass generic options. InstallProtocolManager will handle specific logic for 'add_client' phase.
                 // For xray-vless it uses builtin fallback in runScript.
                 try {
+                    error_log("DEBUG: Attempting to add client via IPM. Slug: " . ($protoRow['slug'] ?? 'N/A') . ", ClientUUID: " . ($vars['client_id'] ?? 'N/A'));
                     require_once __DIR__ . '/InstallProtocolManager.php';
                     InstallProtocolManager::addClient($server, $protoRow, $vars);
+                    error_log("DEBUG: IPM::addClient returned successfully");
                 } catch (Exception $e) {
-                    error_log("Failed to add client to server: " . $e->getMessage());
+                    error_log("DEBUG: Failed to add client to server: " . $e->getMessage());
                     throw $e;
                 }
+            } else {
+                error_log("DEBUG: protoRow is empty, cannot call IPM::addClient");
             }
 
             $config = $protoRow ? ProtocolService::generateProtocolOutput($protoRow, $vars) : '';
@@ -959,32 +967,11 @@ class VpnClient
 
         try {
             // Check for X-Ray VLESS
-            if (strpos($config, 'vless://') === 0) {
-                // Parse VLESS URI
-                $parsed = parse_url($config);
-                // Allow missing user (UUID) and port for partial configs
-                if ($parsed && isset($parsed['host'])) {
-                    $host = $parsed['host'];
-                    $port = isset($parsed['port']) ? (int) $parsed['port'] : 443;
-                    $clientId = $parsed['user'] ?? '';
-                    $fragment = $parsed['fragment'] ?? '';
-
-                    parse_str($parsed['query'] ?? '', $query);
-
-                    $reality = null;
-                    if (($query['security'] ?? '') === 'reality') {
-                        $reality = [
-                            'publicKey' => $query['pbk'] ?? '',
-                            'serverName' => $query['sni'] ?? '',
-                            'shortId' => $query['sid'] ?? '',
-                            'fingerprint' => $query['fp'] ?? 'chrome'
-                        ];
-                    }
-
-                    // Use QrUtil to encode correct X-Ray payload
-                    $payloadXray = QrUtil::encodeXrayPayload($host, $port, $clientId, $fragment, $reality, $config);
-                    return QrUtil::pngBase64($payloadXray);
-                }
+            // Check for X-Ray VLESS, VMess, Shadowsocks (Standard URI schemes)
+            if (strpos($config, 'vless://') === 0 || strpos($config, 'vmess://') === 0 || strpos($config, 'ss://') === 0) {
+                // Generate a standard QR code containing just the URI string.
+                // This is compatible with Amnezia VPB, v2rayNG, and other standard clients.
+                return QrUtil::pngBase64($config);
             }
 
             // Fallback for WireGuard / default
