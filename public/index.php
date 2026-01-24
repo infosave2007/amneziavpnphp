@@ -1124,6 +1124,10 @@ Router::get('/clients/{id}', function ($params) {
                 $stmt->execute([$serverData['install_protocol'] ?? '']);
                 $protocol = $stmt->fetch();
             }
+
+            if ($protocol) {
+                $clientData['show_text_content'] = !empty($protocol['show_text_content']);
+            }
             if ($protocol && ($protocol['output_template'] ?? '') !== '') {
                 $slug = $protocol['slug'] ?? '';
                 $isWireguard = in_array($slug, ['amnezia-wg-advanced', 'wireguard-standard', 'amnezia-wg'], true);
