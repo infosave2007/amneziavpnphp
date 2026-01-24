@@ -1021,6 +1021,8 @@ class InstallProtocolManager
                     $stmt2 = $pdo->prepare('INSERT INTO server_protocols (server_id, protocol_id, config_data, applied_at, created_at) VALUES (?, ?, ?, NOW(), NOW()) ON DUPLICATE KEY UPDATE config_data = VALUES(config_data), applied_at = NOW()');
                     $stmt2->execute([$serverId, $pid, json_encode($config)]);
                 }
+                // Sync existing clients from DB to Container (Restore active clients)
+                self::syncClientsToContainer($server, $protocol);
                 return ['success' => true, 'mode' => 'install', 'details' => $res];
             }
             if (!isset($options['server_port']) || !is_int($options['server_port'])) {
@@ -1227,5 +1229,62 @@ class InstallProtocolManager
         Logger::appendInstall($server->getId(), "Updated X-Ray config and restarted container");
 
         return ['success' => true];
+    }
+
+    /**
+     * Sync all active clients from DB to the Container configuration
+     */
+    private static function syncClientsToContainer(VpnServer $server, array $protocol): void
+    {
+        $serverId = $server->getId();
+        $pdo = DB::conn();
+        
+        // Fetch active clients
+        $stmt = $pdo->prepare("SELECT * FROM vpn_clients WHERE server_id = ? AND status = 'active'");
+        $stmt->execute([$serverId]);
+        $clients = $stmt->fetchAll();
+        
+        if (empty($clients)) {
+            return;
+        }
+
+        $containerName = $server->getData()['container_name'] ?? 'amnezia-awg';
+        
+        // Read existing config
+        $conf = $server->executeCommand("docker exec -i $containerName cat /opt/amnezia/awg/wg0.conf", true);
+        if (!$conf) return;
+
+        $newPeersBlock = "";
+        $count = 0;
+        
+        foreach ($clients as $client) {
+            $ip = $client['client_ip'];
+            // Check if peer already exists (simple check by IP)
+            if (strpos($conf, $ip) !== false) {
+                continue;
+            }
+            
+            // Append Peer
+            $newPeersBlock .= "\n[Peer]\n";
+            $newPeersBlock .= "PublicKey = " . $client['public_key'] . "\n";
+            if (!empty($client['preshared_key'])) {
+                $newPeersBlock .= "PresharedKey = " . $client['preshared_key'] . "\n";
+            }
+            // Use AllowedIPs from DB or default to /32
+            $allowed = $client['allowed_ips'] ?? "$ip/32";
+            $newPeersBlock .= "AllowedIPs = $allowed\n";
+            $count++;
+        }
+        
+        if ($count > 0) {
+            Logger::appendInstall($serverId, "Syncing $count existing clients to server config");
+            $conf .= $newPeersBlock;
+            $escaped = addslashes($conf);
+            $server->executeCommand("docker exec -i $containerName sh -c 'echo \"$escaped\" > /opt/amnezia/awg/wg0.conf'", true);
+            
+            // Reload interface
+            $server->executeCommand("docker exec -i $containerName wg-quick down wg0 || true", true);
+            $server->executeCommand("docker exec -i $containerName wg-quick up wg0", true);
+        }
     }
 }
