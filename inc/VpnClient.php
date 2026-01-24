@@ -386,6 +386,28 @@ class VpnClient
             if (($slug ?? '') === 'smb' && empty($vars['password'])) {
                 $vars['password'] = $pass;
             }
+
+            // Ensure client_id (UUID) for X-Ray
+            if (empty($vars['client_id']) && (stripos($slug, 'xray') !== false || stripos($slug, 'vless') !== false)) {
+                $data = random_bytes(16);
+                $data[6] = chr(ord($data[6]) & 0x0f | 0x40);
+                $data[8] = chr(ord($data[8]) & 0x3f | 0x80);
+                $vars['client_id'] = vsprintf('%s%s-%s-%s-%s-%s%s%s', str_split(bin2hex($data), 4));
+            }
+
+            // Try to add client to server via universal manager (supports scripts and builtins)
+            if ($protoRow) {
+                // We pass generic options. InstallProtocolManager will handle specific logic for 'add_client' phase.
+                // For xray-vless it uses builtin fallback in runScript.
+                try {
+                    require_once __DIR__ . '/InstallProtocolManager.php';
+                    InstallProtocolManager::addClient($server, $protoRow, $vars);
+                } catch (Exception $e) {
+                    error_log("Failed to add client to server: " . $e->getMessage());
+                    throw $e;
+                }
+            }
+
             $config = $protoRow ? ProtocolService::generateProtocolOutput($protoRow, $vars) : '';
 
             // Prepare last_config_json for QR code generation if config is JSON (XRay)

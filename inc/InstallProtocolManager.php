@@ -285,7 +285,7 @@ class InstallProtocolManager
                 'awg_params' => $result['awg_params'] ?? null,
             ];
             if (($protocol['slug'] ?? '') === 'xray-vless') {
-                foreach (['client_id','container_name','server_port','xray_port','reality_public_key','reality_private_key','reality_short_id','reality_server_name'] as $k) {
+                foreach (['client_id', 'container_name', 'server_port', 'xray_port', 'reality_public_key', 'reality_private_key', 'reality_short_id', 'reality_server_name'] as $k) {
                     if (array_key_exists($k, $result)) {
                         $extras[$k] = $result[$k];
                     }
@@ -494,6 +494,11 @@ class InstallProtocolManager
         ];
     }
 
+    public static function addClient(VpnServer $server, array $protocol, array $options = []): array
+    {
+        return self::runScript($server, $protocol, 'add_client', $options);
+    }
+
     private static function runScript(VpnServer $server, array $protocol, string $phase, array $options = []): array
     {
         $definition = $protocol['definition'] ?? [];
@@ -503,6 +508,8 @@ class InstallProtocolManager
                 $scripts = $protocol['install_script'] ?? null;
             } elseif ($phase === 'uninstall') {
                 $scripts = $protocol['uninstall_script'] ?? null;
+            } elseif ($phase === 'add_client' && ($protocol['slug'] ?? '') === 'xray-vless') {
+                return self::runBuiltinXrayAddClient($server, $options);
             }
         }
         if (!$scripts) {
@@ -517,6 +524,11 @@ class InstallProtocolManager
                     'success' => true,
                     'message' => 'Скрипт удаления не настроен для протокола'
                 ];
+            }
+            if ($phase === 'add_client') {
+                // If no script and no builtin handler, we just skip it (assume not needed or manual)
+                // Or throw generic error? Better return success to not break flow if not implemented for other protocols
+                return ['success' => true, 'message' => 'No add_client script defined'];
             }
             throw new Exception('Скрипт ' . $phase . ' не настроен для протокола');
         }
@@ -1049,7 +1061,7 @@ class InstallProtocolManager
                 }
                 try {
                     $cfg = $server->executeCommand("docker exec -i " . escapeshellarg($containerName) . " cat /opt/amnezia/xray/server.json 2>/dev/null", true);
-                    if (trim((string)$cfg) === '') {
+                    if (trim((string) $cfg) === '') {
                         $cfg = $server->executeCommand("docker exec -i " . escapeshellarg($containerName) . " cat /etc/xray/config.json 2>/dev/null", true);
                     }
                     $decoded = json_decode(trim((string) $cfg), true);
@@ -1112,7 +1124,10 @@ class InstallProtocolManager
                 $config = [
                     'server_host' => $server->getData()['host'] ?? null,
                     'server_port' => $port,
-                    'extras' => ['password' => $password, 'client_id' => $clientId, 'result' => $res,
+                    'extras' => [
+                        'password' => $password,
+                        'client_id' => $clientId,
+                        'result' => $res,
                         'reality_public_key' => $res['reality_public_key'] ?? null,
                         'reality_short_id' => $res['reality_short_id'] ?? null,
                         'reality_server_name' => $res['reality_server_name'] ?? null,
@@ -1127,5 +1142,89 @@ class InstallProtocolManager
             Logger::appendInstall($serverId, 'Activate failed: ' . $e->getMessage());
             throw $e;
         }
+    }
+
+    private static function runBuiltinXrayAddClient(VpnServer $server, array $options): array
+    {
+        $clientId = $options['client_id'] ?? null;
+        if (!$clientId) {
+            throw new Exception("Client ID is required for X-Ray add_client");
+        }
+
+        // Default container name if not provided
+        $containerName = 'amnezia-xray';
+        if (!empty($options['container_name'])) {
+            $containerName = $options['container_name'];
+        }
+
+        Logger::appendInstall($server->getId(), "Adding X-Ray client $clientId to container $containerName");
+
+        // 1. Read config
+        $catCmd = "docker exec -i " . escapeshellarg($containerName) . " cat /opt/amnezia/xray/server.json 2>/dev/null";
+        $configRaw = $server->executeCommand($catCmd, true);
+
+        if (trim($configRaw) === '') {
+            $catCmd = "docker exec -i " . escapeshellarg($containerName) . " cat /etc/xray/config.json 2>/dev/null";
+            $configRaw = $server->executeCommand($catCmd, true);
+        }
+
+        if (trim($configRaw) === '') {
+            throw new Exception("Could not read X-Ray config from $containerName");
+        }
+
+        $config = json_decode($configRaw, true);
+        if (!$config) {
+            throw new Exception("Invalid JSON in X-Ray config");
+        }
+
+        // 2. Modify config
+        // Assuming VLESS structure: inbounds[0] -> settings -> clients
+        if (!isset($config['inbounds'][0]['settings']['clients'])) {
+            // Might be different structure? But we stick to standard Amnezia XRay config
+            if (!isset($config['inbounds'][0]['settings'])) {
+                $config['inbounds'][0]['settings'] = [];
+            }
+            if (!isset($config['inbounds'][0]['settings']['clients'])) {
+                $config['inbounds'][0]['settings']['clients'] = [];
+            }
+        }
+
+        // Check if client exists
+        $clients = &$config['inbounds'][0]['settings']['clients'];
+        foreach ($clients as $c) {
+            if (($c['id'] ?? '') === $clientId) {
+                // Already exists
+                Logger::appendInstall($server->getId(), "Client $clientId already exists in X-Ray config");
+                return ['success' => true, 'message' => 'Client already exists'];
+            }
+        }
+
+        // Add client
+        $newClient = ['id' => $clientId];
+
+        // Detect flow from other clients or default
+        $flow = 'xtls-rprx-vision'; // Default for Reality
+        if (!empty($clients)) {
+            if (isset($clients[0]['flow'])) {
+                $flow = $clients[0]['flow'];
+            }
+        }
+        $newClient['flow'] = $flow;
+
+        $clients[] = $newClient;
+
+        // 3. Write config back
+        $newJson = json_encode($config, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
+        $b64 = base64_encode($newJson);
+        $writeCmd = "docker exec -i " . escapeshellarg($containerName) . " sh -c 'echo \"$b64\" | base64 -d > /opt/amnezia/xray/server.json'";
+
+        $server->executeCommand($writeCmd, true);
+
+        // 4. Restart container
+        $server->executeCommand("docker restart " . escapeshellarg($containerName), true);
+
+        Logger::appendInstall($server->getId(), "Updated X-Ray config and restarted container");
+
+        return ['success' => true];
     }
 }
