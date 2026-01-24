@@ -51,15 +51,17 @@ try {
     // vpn_servers table has server_public_key... but usually NOT private key?
     // Start script puts keys in /opt/amnezia/awg/....key
     // We should READ them from file to be safe.
+    // Read directly from HOST file to avoid container dependency (deadlock if stuck in restart loop)
+    $privKey = trim($server->executeCommand("cat /opt/amnezia/awg/wireguard_server_private_key.key 2>/dev/null", true));
 
-    $privKey = trim($server->executeCommand("docker exec -i $containerName cat /opt/amnezia/awg/server_private.key", true));
-    if (!$privKey) {
-        // Try file mapping
-        $privKey = trim($server->executeCommand("cat /opt/amnezia/amnezia-awg/server_private.key", true));
+    if (empty($privKey)) {
+        // Fallback: try container exec (only if host file missing)
+        $privKey = trim($server->executeCommand("docker exec -i $containerName cat /opt/amnezia/awg/server_private.key", true));
     }
 
-    if (!$privKey) {
-        die("Fatal: Could not retrieve Server Private Key from keys files.\n");
+    if (!$privKey || strpos($privKey, 'Error response') !== false) {
+        // If still missing or error message
+        die("Fatal: Could not retrieve Server Private Key. Check /opt/amnezia/awg/ directory.\n");
     }
 
     $vpnPort = $data['vpn_port'] ?? 51820;
