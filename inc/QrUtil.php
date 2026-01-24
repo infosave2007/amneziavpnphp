@@ -409,59 +409,38 @@ class QrUtil
         return json_encode($decoded, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
     }
 
-    public static function encodeXrayPayload(string $host, int $port, string $clientId, string $description = '', ?array $reality = null): string
+    public static function encodeXrayPayload(string $host, int $port, string $clientId, string $description = '', ?array $reality = null, string $rawConfig = ''): string
     {
         $desc = $description !== '' ? $description : self::resolveServerDescription($host);
-        $clientCfg = [
-            'log' => ['loglevel' => 'error'],
-            'inbounds' => [
-                [
-                    'listen' => '127.0.0.1',
-                    'port' => 10808,
-                    'protocol' => 'socks',
-                    'settings' => ['udp' => true]
-                ]
-            ],
-            'outbounds' => [
-                [
-                    'protocol' => 'vless',
-                    'settings' => [
-                        'vnext' => [
-                            [
-                                'address' => $host,
-                                'port' => $port,
-                                'users' => [
-                                    [
-                                        'id' => $clientId,
-                                        'flow' => ($reality && isset($reality['publicKey']) && $reality['publicKey'] !== '') ? 'xtls-rprx-vision' : null,
-                                        'encryption' => 'none'
-                                    ]
-                                ]
-                            ]
-                        ]
-                    ],
-                    'streamSettings' => [
-                        'network' => 'tcp',
-                        'security' => ($reality && isset($reality['publicKey']) && $reality['publicKey'] !== '') ? 'reality' : 'none',
-                        'realitySettings' => ($reality && isset($reality['publicKey']) && $reality['publicKey'] !== '') ? [
-                            'fingerprint' => 'chrome',
-                            'serverName' => (string) ($reality['serverName'] ?? $host),
-                            'publicKey' => (string) $reality['publicKey'],
-                            'shortId' => (string) ($reality['shortId'] ?? ''),
-                            'spiderX' => ''
-                        ] : null
-                    ]
-                ]
-            ]
-        ];
+
+        // Instead of generating a JSON config, we wrap the raw VLESS URI in a "config" field.
+        // This matches how WireGuard configs are handled in master branch and is likely what Amnezia expects.
+        // If rawConfig is not provided, we reconstruct a basic VLESS URI (fallback)
+        if (empty($rawConfig)) {
+            // Basic reconstruction if needed, but we should pass valid rawConfig from VpnClient
+            $security = ($reality && isset($reality['publicKey']) && $reality['publicKey'] !== '') ? 'reality' : 'none';
+            $type = 'tcp';
+            $flow = ($security === 'reality') ? 'xtls-rprx-vision' : '';
+
+            $query = http_build_query([
+                'security' => $security,
+                'type' => $type,
+                'flow' => $flow,
+                'sni' => $reality['serverName'] ?? '',
+                'pbk' => $reality['publicKey'] ?? '',
+                'fp' => $reality['fingerprint'] ?? 'chrome',
+                'sid' => $reality['shortId'] ?? ''
+            ]);
+            $rawConfig = "vless://$clientId@$host:$port?$query";
+        }
 
         $envelope = [
             'containers' => [
                 [
                     'xray' => [
                         'isThirdPartyConfig' => true,
-                        // X-Ray config must be wrapped in a "config" field inside the last_config JSON
-                        'last_config' => json_encode(['config' => json_encode($clientCfg, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT)], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+                        // Wrap the raw VLESS URI in a "config" field inside last_config
+                        'last_config' => json_encode(['config' => $rawConfig], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
                         'port' => (string) $port,
                         'transport_proto' => 'tcp'
                     ],

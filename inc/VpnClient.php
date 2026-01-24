@@ -960,7 +960,7 @@ class VpnClient
                     }
 
                     // Use QrUtil to encode correct X-Ray payload
-                    $payloadXray = QrUtil::encodeXrayPayload($host, $port, $clientId, $fragment, $reality);
+                    $payloadXray = QrUtil::encodeXrayPayload($host, $port, $clientId, $fragment, $reality, $config);
                     return QrUtil::pngBase64($payloadXray);
                 }
             }
