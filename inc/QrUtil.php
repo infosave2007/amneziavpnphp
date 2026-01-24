@@ -63,16 +63,15 @@ class QrUtil
     public static function encodeOldPayloadFromJson(string $jsonText): string
     {
         $json = self::normalizeJson($jsonText);
-        // Amnezia format: 12-byte header [version, compressed_len, uncompressed_len] + zlib compressed data
-        // Version 0x07C00100 is required for compatibility with Amnezia apps
         $compressed = gzcompress($json, 9);
         if ($compressed === false) {
             throw new RuntimeException('gzcompress failed');
         }
         $uncompressedLen = strlen($json);
-        $compressedLen = strlen($compressed) + 4; // +4 for the uncompressed length field
-        $version = 0x07C00100; // Amnezia magic version number
-        $header = pack('N3', $version, $compressedLen, $uncompressedLen);
+        $version = 0x07C00100; // Magic 1984 (07C0), Count 1, Id 0
+        // Pack version (4 bytes) and uncompressed length (4 bytes)
+        // Note: we skipped compressedLen which was present in old format but invalid for qUncompress
+        $header = pack('NN', $version, $uncompressedLen);
         return self::urlsafe_b64_encode($header . $compressed);
     }
 
