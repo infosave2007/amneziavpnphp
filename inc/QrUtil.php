@@ -68,10 +68,9 @@ class QrUtil
             throw new RuntimeException('gzcompress failed');
         }
         $uncompressedLen = strlen($json);
-        $version = 0x07C00100; // Magic 1984 (07C0), Count 1, Id 0
-        // Pack version (4 bytes) and uncompressed length (4 bytes)
-        // Note: we skipped compressedLen which was present in old format but invalid for qUncompress
-        $header = pack('NN', $version, $uncompressedLen);
+        $compressedLen = strlen($compressed) + 4; // +4 for the uncompressed length field
+        $version = 0x07C00100; // Amnezia magic version number
+        $header = pack('N3', $version, $compressedLen, $uncompressedLen);
         return self::urlsafe_b64_encode($header . $compressed);
     }
 
