@@ -63,15 +63,15 @@ class QrUtil
     public static function encodeOldPayloadFromJson(string $jsonText): string
     {
         $json = self::normalizeJson($jsonText);
-        // Old format uses zlib (gzcompress) with header [version, compressed_len, uncompressed_len]
+        // Qt qCompress format: 4-byte big-endian uncompressed length + zlib compressed data
+        // This is what Amnezia Android's qUncompress expects
         $compressed = gzcompress($json, 9);
         if ($compressed === false) {
             throw new RuntimeException('gzcompress failed');
         }
         $uncompressedLen = strlen($json);
-        $compressedLen = strlen($compressed) + 4;
-        $version = 0x07C00100; // align with working payload header (big-endian)
-        $header = pack('N3', $version, $compressedLen, $uncompressedLen);
+        // Qt format: 4 bytes of uncompressed length (big-endian) + zlib data
+        $header = pack('N', $uncompressedLen);
         return self::urlsafe_b64_encode($header . $compressed);
     }
 
