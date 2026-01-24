@@ -458,13 +458,14 @@ class QrUtil
         $envelope = [
             'containers' => [
                 [
-                    'container' => 'amnezia-xray',
                     'xray' => [
+                        'isThirdPartyConfig' => true,
                         // X-Ray config must be wrapped in a "config" field inside the last_config JSON
                         'last_config' => json_encode(['config' => json_encode($clientCfg, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT)], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
                         'port' => (string) $port,
                         'transport_proto' => 'tcp'
-                    ]
+                    ],
+                    'container' => 'amnezia-xray'
                 ]
             ],
             'defaultContainer' => 'amnezia-xray',
