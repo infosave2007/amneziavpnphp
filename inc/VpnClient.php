@@ -1479,14 +1479,30 @@ class VpnClient
         // user>>>uuid>>>traffic>>>uplink: 1024
         // user>>>uuid>>>traffic>>>downlink: 2048
 
-        $lines = explode("\n", trim($output));
-        foreach ($lines as $line) {
-            if (preg_match('/user>>>.+>>>traffic>>>uplink:\s*(\d+)/', $line, $m)) {
-                $stats['bytes_sent'] = (int) $m[1];
-            } elseif (preg_match('/user>>>.+>>>traffic>>>downlink:\s*(\d+)/', $line, $m)) {
-                $stats['bytes_received'] = (int) $m[1];
+        // Parse JSON output
+        $json = json_decode($output, true);
+        if (is_array($json) && isset($json['stat']) && is_array($json['stat'])) {
+            foreach ($json['stat'] as $item) {
+                if (!isset($item['name']) || !isset($item['value']))
+                    continue;
+                if (strpos($item['name'], 'uplink') !== false) {
+                    $stats['bytes_sent'] += (int) $item['value'];
+                } elseif (strpos($item['name'], 'downlink') !== false) {
+                    $stats['bytes_received'] += (int) $item['value'];
+                }
+            }
+        } else {
+            // Fallback to text parsing (legacy)
+            $lines = explode("\n", trim($output));
+            foreach ($lines as $line) {
+                if (preg_match('/user>>>.+>>>traffic>>>uplink:\s*(\d+)/', $line, $m)) {
+                    $stats['bytes_sent'] = (int) $m[1];
+                } elseif (preg_match('/user>>>.+>>>traffic>>>downlink:\s*(\d+)/', $line, $m)) {
+                    $stats['bytes_received'] = (int) $m[1];
+                }
             }
         }
+
 
         return $stats;
     }
@@ -1516,12 +1532,18 @@ class VpnClient
             // Or better: try to detect protocol from config if container name is vague (but usually amnezia-xray)
 
             if (strpos($containerName, 'xray') !== false) {
-                // Use client Name (Login) as identifier strictly requested by user
-                $identifier = $this->data['name'] ?? null;
+                // Extract UUID from config for XRay (vless://UUID@...)
+                $identifier = null;
+                if (!empty($this->data['config']) && preg_match('/vless:\/\/([0-9a-fA-F-]{36})@/i', $this->data['config'], $m)) {
+                    $identifier = $m[1];
+                } elseif (!empty($this->data['name'])) {
+                    $identifier = $this->data['name'];
+                }
 
                 if ($identifier) {
                     $stats = self::getXrayStats($serverData, $identifier);
                 }
+
             }
 
             if (empty($stats)) {

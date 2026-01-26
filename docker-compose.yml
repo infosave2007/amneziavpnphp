@@ -57,8 +57,7 @@ services:
     restart: unless-stopped
     environment:
       DOCKER_TLS_CERTDIR: ""
-    ports:
-      - "2375:2375"
+
     volumes:
       - dind_data:/var/lib/docker
 

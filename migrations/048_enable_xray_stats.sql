@@ -1,5 +1,123 @@
 -- Enable Stats and API for XRay VLESS protocol
 -- This allows collecting traffic usage per user
+-- Supports restoration of existing keys via environment variables
 
-UPDATE protocols SET install_script = '#!/bin/bash\n\nset -euo pipefail\nset -x\n\nCONTAINER_NAME="${CONTAINER_NAME:-amnezia-xray}"\nPORT_RANGE_START=${PORT_RANGE_START:-30000}\nPORT_RANGE_END=${PORT_RANGE_END:-65000}\nXRAY_PORT=$((RANDOM % (PORT_RANGE_END - PORT_RANGE_START + 1) + PORT_RANGE_START))\n\nPRIVATE_KEY=$(docker run --rm teddysun/xray xray x25519 | grep "Private key:" | awk ''{print $3}'')\nPUBLIC_KEY=$(docker run --rm teddysun/xray xray x25519 -i "$PRIVATE_KEY" | grep "Public key:" | awk ''{print $3}'')\nSHORT_ID=$(openssl rand -hex 8)\nCLIENT_ID=$(cat /proc/sys/kernel/random/uuid)\n\nSERVER_NAME="www.googletagmanager.com"\nFINGERPRINT="chrome"\nSPIDER_X="/"\n\ndocker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true\nmkdir -p /opt/amnezia/xray\n\ncat > /opt/amnezia/xray/server.json << EOF\n{\n  "log": { "loglevel": "warning" },\n  "stats": {},\n  "api": {\n    "tag": "api",\n    "services": [\n      "StatsService"\n    ]\n  },\n  "policy": {\n    "levels": {\n      "0": {\n        "statsUserUplink": true,\n        "statsUserDownlink": true\n      }\n    },\n    "system": {\n      "statsInboundUplink": true,\n      "statsInboundDownlink": true\n    }\n  },\n  "inbounds": [\n    {\n      "listen": "0.0.0.0",\n      "port": ${XRAY_PORT},\n      "protocol": "vless",\n      "settings": {\n        "clients": [ { "id": "${CLIENT_ID}", "email": "${CLIENT_ID}" } ],\n        "decryption": "none",\n        "fallbacks": [ { "dest": 80 } ]\n      },\n      "streamSettings": {\n        "network": "tcp",\n        "security": "reality",\n        "realitySettings": {\n          "show": false,\n          "dest": "${SERVER_NAME}:443",\n          "xver": 0,\n          "serverNames": [ "${SERVER_NAME}" ],\n          "privateKey": "${PRIVATE_KEY}",\n          "shortIds": [ "${SHORT_ID}" ],\n          "fingerprint": "${FINGERPRINT}",\n          "spiderX": "${SPIDER_X}"\n        }\n      }\n    },\n    {\n      "listen": "127.0.0.1",\n      "port": 10085,\n      "protocol": "dokodemo-door",\n      "tag": "api",\n      "settings": {\n        "address": "127.0.0.1"\n      }\n    }\n  ],\n  "outbounds": [ \n    { "protocol": "freedom", "tag": "direct" }\n  ],\n  "routing": {\n    "rules": [\n      {\n        "inboundTag": [\n          "api"\n        ],\n        "outboundTag": "api",\n        "type": "field"\n      }\n    ]\n  }\n}\nEOF\n\n# start container\ndocker run -d \\\n  --name "$CONTAINER_NAME" \\\n  --restart always \\\n  --network host \\\n  -v /opt/amnezia/xray:/opt/amnezia/xray \\\n  teddysun/xray xray run -c /opt/amnezia/xray/server.json\n\nsleep 2\n\n# panel output\necho "Port: ${XRAY_PORT}"\necho "ClientID: ${CLIENT_ID}"\necho "PublicKey: ${PUBLIC_KEY}"\necho "PrivateKey: ${PRIVATE_KEY}"\necho "ShortID: ${SHORT_ID}"\necho "ServerName: ${SERVER_NAME}"'
+UPDATE protocols SET install_script = '#!/bin/bash
+set -eu
+
+CONTAINER_NAME="${CONTAINER_NAME:-amnezia-xray}"
+XRAY_PORT=${SERVER_PORT:-443}
+
+docker pull teddysun/xray >/dev/null 2>&1 || true
+
+# Use existing keys if provided, otherwise generate new ones
+if [ -z "${PRIVATE_KEY:-}" ]; then
+  GEN=$(docker run --rm --entrypoint /usr/bin/xray teddysun/xray x25519 2>/dev/null || true)
+  PRIVATE_KEY=$(printf "%s\\n" "$GEN" | sed -n -E "s/^[Pp]rivate[Kk]ey:[[:space:]]*(.*)$/\\1/p" | tr -d " \\t\\r\\n")
+  if [ -z "$PRIVATE_KEY" ]; then
+    PRIVATE_KEY=$(printf "%s\\n" "$GEN" | grep -i "private" | head -1 | sed "s/.*:[[:space:]]*//" | tr -d " \\t\\r\\n")
+  fi
+fi
+
+# Derive public key from private key
+PUBLIC_KEY=$(docker run --rm --entrypoint /usr/bin/xray teddysun/xray x25519 -i "$PRIVATE_KEY" 2>/dev/null | sed -n -E "s/^[Pp]ublic[[:space:]]*[Kk]ey:[[:space:]]*(.*)$/\\1/p" | tr -d " \\t\\r\\n" || true)
+if [ -z "$PUBLIC_KEY" ]; then
+  PUBLIC_KEY=$(docker run --rm --entrypoint /usr/bin/xray teddysun/xray x25519 -i "$PRIVATE_KEY" 2>/dev/null | sed -n -E "s/^[Pp]assword:[[:space:]]*(.*)$/\\1/p" | tr -d " \\t\\r\\n" || true)
+fi
+
+# Use existing short_id or generate new one
+if [ -z "${SHORT_ID:-}" ]; then
+  SHORT_ID=$(od -An -tx1 -N8 /dev/urandom | tr -d " \\n")
+fi
+
+# Use existing client_id or generate new one
+if [ -z "${CLIENT_ID:-}" ]; then
+  CLIENT_ID=$(cat /proc/sys/kernel/random/uuid)
+fi
+
+SERVER_NAME="${SERVER_NAME:-www.googletagmanager.com}"
+FINGERPRINT="${FINGERPRINT:-chrome}"
+SPIDER_X="${SPIDER_X:-/}"
+
+docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+mkdir -p /opt/amnezia/xray
+
+cat > /opt/amnezia/xray/server.json <<EOJSON
+{
+  "log": { "loglevel": "warning" },
+  "stats": {},
+  "api": {
+    "tag": "api",
+    "services": [ "StatsService" ]
+  },
+  "policy": {
+    "levels": {
+      "0": {
+        "statsUserUplink": true,
+        "statsUserDownlink": true
+      }
+    },
+    "system": {
+      "statsInboundUplink": true,
+      "statsInboundDownlink": true
+    }
+  },
+  "inbounds": [{
+    "listen": "0.0.0.0",
+    "port": ${XRAY_PORT},
+    "protocol": "vless",
+    "settings": {
+      "clients": [{ "id": "${CLIENT_ID}", "flow": "xtls-rprx-vision", "email": "${CLIENT_ID}" }],
+      "decryption": "none"
+    },
+    "streamSettings": {
+      "network": "tcp",
+      "security": "reality",
+      "realitySettings": {
+        "show": false,
+        "dest": "${SERVER_NAME}:443",
+        "xver": 0,
+        "serverNames": ["${SERVER_NAME}"],
+        "privateKey": "${PRIVATE_KEY}",
+        "shortIds": ["${SHORT_ID}"],
+        "fingerprint": "${FINGERPRINT}",
+        "spiderX": "${SPIDER_X}"
+      }
+    }
+  },
+  {
+      "listen": "127.0.0.1",
+      "port": 10085,
+      "protocol": "dokodemo-door",
+      "tag": "api",
+      "settings": {
+        "address": "127.0.0.1"
+      }
+  }],
+  "outbounds": [{ "protocol": "freedom", "tag": "direct" }],
+  "routing": {
+    "rules": [
+      {
+        "inboundTag": [ "api" ],
+        "outboundTag": "api",
+        "type": "field"
+      }
+    ]
+  }
+}
+EOJSON
+
+docker run -d --name "$CONTAINER_NAME" --restart always -p "${XRAY_PORT}:${XRAY_PORT}" -v /opt/amnezia/xray:/opt/amnezia/xray teddysun/xray xray run -c /opt/amnezia/xray/server.json
+
+sleep 2
+
+echo "XrayPort: ${XRAY_PORT}"
+echo "Port: ${XRAY_PORT}"
+echo "ClientID: ${CLIENT_ID}"
+echo "PublicKey: ${PUBLIC_KEY}"
+echo "PrivateKey: ${PRIVATE_KEY}"
+echo "ShortID: ${SHORT_ID}"
+echo "ServerName: ${SERVER_NAME}"
+echo "ContainerName: ${CONTAINER_NAME}"
+'
 WHERE slug = 'xray-vless';

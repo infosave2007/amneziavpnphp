@@ -726,6 +726,31 @@ class InstallProtocolManager
                 : (isset($options['server_port']) ? (int) $options['server_port'] : ''),
         ];
 
+        // Check for saved Reality keys in server_protocols table
+        $serverId = $serverData['id'] ?? null;
+        if ($serverId) {
+            try {
+                $pdo = DB::conn();
+                $stmt = $pdo->prepare('SELECT config_data FROM server_protocols WHERE server_id = ? ORDER BY applied_at DESC LIMIT 1');
+                $stmt->execute([$serverId]);
+                $configJson = $stmt->fetchColumn();
+                if ($configJson) {
+                    $config = json_decode($configJson, true);
+                    $extras = $config['extras'] ?? [];
+                    // Export saved Reality keys if reinstalling (allow script to reuse them)
+                    if (!empty($extras['reality_private_key'])) {
+                        $pairs['PRIVATE_KEY'] = $extras['reality_private_key'];
+                    }
+                    if (!empty($extras['reality_short_id'])) {
+                        $pairs['SHORT_ID'] = $extras['reality_short_id'];
+                    }
+                    // Note: CLIENT_ID is per-client, not per-server, so we don't restore it here
+                }
+            } catch (Throwable $e) {
+                // Ignore errors, will generate new keys
+            }
+        }
+
         foreach ($pairs as $key => $value) {
             if ($value !== '' && $value !== null) {
                 $exports[] = sprintf('export %s=%s', $key, escapeshellarg((string) $value));
@@ -1102,6 +1127,10 @@ class InstallProtocolManager
                                 if ($publicKey) {
                                     $res['reality_public_key'] = $publicKey;
                                 }
+                                // Store private key for future restoration
+                                if (is_string($privateKey) && $privateKey !== '') {
+                                    $res['reality_private_key'] = $privateKey;
+                                }
                                 if ($shortId) {
                                     $res['reality_short_id'] = $shortId;
                                 }
@@ -1131,6 +1160,7 @@ class InstallProtocolManager
                         'client_id' => $clientId,
                         'result' => $res,
                         'reality_public_key' => $res['reality_public_key'] ?? null,
+                        'reality_private_key' => $res['reality_private_key'] ?? null,
                         'reality_short_id' => $res['reality_short_id'] ?? null,
                         'reality_server_name' => $res['reality_server_name'] ?? null,
                     ]
@@ -1238,32 +1268,33 @@ class InstallProtocolManager
     {
         $serverId = $server->getId();
         $pdo = DB::conn();
-        
+
         // Fetch active clients
         $stmt = $pdo->prepare("SELECT * FROM vpn_clients WHERE server_id = ? AND status = 'active'");
         $stmt->execute([$serverId]);
         $clients = $stmt->fetchAll();
-        
+
         if (empty($clients)) {
             return;
         }
 
         $containerName = $server->getData()['container_name'] ?? 'amnezia-awg';
-        
+
         // Read existing config
         $conf = $server->executeCommand("docker exec -i $containerName cat /opt/amnezia/awg/wg0.conf", true);
-        if (!$conf) return;
+        if (!$conf)
+            return;
 
         $newPeersBlock = "";
         $count = 0;
-        
+
         foreach ($clients as $client) {
             $ip = $client['client_ip'];
             // Check if peer already exists (simple check by IP)
             if (strpos($conf, $ip) !== false) {
                 continue;
             }
-            
+
             // Append Peer
             $newPeersBlock .= "\n[Peer]\n";
             $newPeersBlock .= "PublicKey = " . $client['public_key'] . "\n";
@@ -1275,13 +1306,13 @@ class InstallProtocolManager
             $newPeersBlock .= "AllowedIPs = $allowed\n";
             $count++;
         }
-        
+
         if ($count > 0) {
             Logger::appendInstall($serverId, "Syncing $count existing clients to server config");
             $conf .= $newPeersBlock;
             $escaped = addslashes($conf);
             $server->executeCommand("docker exec -i $containerName sh -c 'echo \"$escaped\" > /opt/amnezia/awg/wg0.conf'", true);
-            
+
             // Reload interface
             $server->executeCommand("docker exec -i $containerName wg-quick down wg0 || true", true);
             $server->executeCommand("docker exec -i $containerName wg-quick up wg0", true);
