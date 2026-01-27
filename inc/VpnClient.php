@@ -623,8 +623,8 @@ class VpnClient
         $stmt->execute([$serverData['id']]);
         $usedIPs = $stmt->fetchAll(PDO::FETCH_COLUMN);
 
-        // Reserve network address
-        $used = ['10.8.1.0' => true];
+        // Reserve network address and server gateway (.1)
+        $used = ['10.8.1.0' => true, '10.8.1.1' => true];
         foreach ($usedIPs as $ip) {
             $used[$ip] = true;
         }
