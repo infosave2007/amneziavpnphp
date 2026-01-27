@@ -38,7 +38,6 @@ DEALLOCATE PREPARE alterIfNotExists;
 -- 2. Insert Data
 INSERT IGNORE INTO protocols (slug, name, description, definition, show_text_content, is_active) VALUES
 ('amnezia-wg', 'AmneziaWG', 'Amnezia WireGuard implementation', '{}', 0, 1),
-('amnezia-xray', 'Amnezia XRay', 'XRay (VLESS/Reality)', '{"scripts":{}}', 0, 1),
 ('wireguard', 'WireGuard', 'Standard WireGuard', '{}', 0, 1),
 ('openvpn', 'OpenVPN', 'Standard OpenVPN', '{}', 0, 1),
 ('shadowsocks', 'Shadowsocks', 'Shadowsocks proxy', '{}', 0, 1),
