@@ -35,9 +35,8 @@ PREPARE alterIfNotExists FROM @preparedStatement;
 EXECUTE alterIfNotExists;
 DEALLOCATE PREPARE alterIfNotExists;
 
--- 2. Insert Data
+-- 2. Insert Data (amnezia-wg removed - use amnezia-wg-advanced instead)
 INSERT IGNORE INTO protocols (slug, name, description, definition, show_text_content, is_active) VALUES
-('amnezia-wg', 'AmneziaWG', 'Amnezia WireGuard implementation', '{}', 0, 1),
 ('wireguard', 'WireGuard', 'Standard WireGuard', '{}', 0, 1),
 ('openvpn', 'OpenVPN', 'Standard OpenVPN', '{}', 0, 1),
 ('shadowsocks', 'Shadowsocks', 'Shadowsocks proxy', '{}', 0, 1),
