@@ -902,6 +902,11 @@ class VpnClient
 
         // 5. Update clientsTable
         self::updateClientsTable($serverData, $publicKey, $clientIP);
+
+        // 6. CRITICAL: Reload WG interface to apply AWG obfuscation params
+        // Without this, the interface uses standard WireGuard without Jc/S1/S2/H1-H4
+        $cmd5 = sprintf("docker exec -i %s sh -c 'ip link del wg0 2>/dev/null || true; wg-quick up /opt/amnezia/awg/wg0.conf 2>&1'", $containerName);
+        self::executeServerCommand($serverData, $cmd5, true);
     }
 
     /**
