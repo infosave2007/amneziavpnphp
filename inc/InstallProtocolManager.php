@@ -241,7 +241,7 @@ class InstallProtocolManager
         return self::runScript($server, $protocol, 'detect', $options);
     }
 
-    private static function install(VpnServer $server, array $protocol, array $options = []): array
+    public static function install(VpnServer $server, array $protocol, array $options = []): array
     {
         $engine = self::getEngine($protocol);
         $serverId = $server->getId();

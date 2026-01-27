@@ -2199,6 +2199,39 @@ Router::post('/api/clients/{id}/restore', function ($params) {
     }
 });
 
+// API: Delete client
+Router::delete('/api/clients/{id}/delete', function ($params) {
+    header('Content-Type: application/json');
+
+    $user = JWT::requireAuth();
+    if (!$user)
+        return;
+
+    $clientId = (int) $params['id'];
+
+    try {
+        $client = new VpnClient($clientId);
+        $clientData = $client->getData();
+
+        // Check ownership
+        if ($clientData['user_id'] != $user['id'] && ($user['role'] ?? '') !== 'admin') {
+            http_response_code(403);
+            echo json_encode(['error' => 'Forbidden']);
+            return;
+        }
+
+        if ($client->delete()) {
+            echo json_encode(['success' => true, 'message' => 'Client deleted']);
+        } else {
+            http_response_code(500);
+            echo json_encode(['error' => 'Failed to delete client']);
+        }
+    } catch (Exception $e) {
+        http_response_code(404);
+        echo json_encode(['error' => 'Client not found']);
+    }
+});
+
 // API: Get server metrics
 Router::get('/api/servers/{id}/metrics', function ($params) {
     header('Content-Type: application/json');
