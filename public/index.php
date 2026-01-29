@@ -1706,6 +1706,16 @@ Router::get('/api/servers', function () {
         return;
 
     $servers = VpnServer::listByUser($user['id']);
+
+    // Enrich with installed protocols
+    $pdo = DB::conn();
+    foreach ($servers as &$server) {
+        $stmt = $pdo->prepare('SELECT p.id, p.slug, p.name FROM server_protocols sp JOIN protocols p ON p.id = sp.protocol_id WHERE sp.server_id = ?');
+        $stmt->execute([$server['id']]);
+        $server['protocols'] = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    }
+    unset($server);
+
     echo json_encode(['servers' => $servers]);
 });
 

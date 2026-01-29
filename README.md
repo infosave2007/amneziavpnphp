@@ -253,16 +253,24 @@ DELETE /api/servers/{id}/delete     - Delete server by ID
 GET    /api/servers/{id}/clients    - List clients on server
 ```
 
+### Protocols
+```
+GET    /api/protocols/active        - List all available protocols (with IDs)
+GET    /api/servers/{id}/protocols  - List installed protocols on server
+POST   /api/servers/{id}/protocols/install - Install protocol
+```
+
 ### Clients
 ```
 GET    /api/clients                 - List all clients
 GET    /api/clients/{id}/details    - Get client details with stats, config and QR code
 GET    /api/clients/{id}/qr         - Get client QR code
 POST   /api/clients/create          - Create new client (returns config and QR code)
-       Parameters: server_id, name, expires_in_days (optional)
+       Parameters: server_id, name, protocol_id (optional, default: installed), expires_in_days (optional)
 POST   /api/clients/{id}/revoke     - Revoke client access
 POST   /api/clients/{id}/restore    - Restore client access
-DELETE /api/clients/{id}/delete     - Delete client by ID
+DELETE /api/clients/{id}/delete     - Delete client by ID (removes from DB and server)
+POST   /api/clients/{id}/set-expiration  - Set client expiration date
 POST   /api/clients/{id}/set-expiration  - Set client expiration date
        Parameters: expires_at (Y-m-d H:i:s or null)
 POST   /api/clients/{id}/extend     - Extend client expiration
