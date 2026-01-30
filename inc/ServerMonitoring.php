@@ -525,16 +525,18 @@ class ServerMonitoring
     private function execSSH(string $cmd): ?string
     {
         $host = $this->serverData['host'];
-        $port = $this->serverData['port'];
+        $port = (int)$this->serverData['port'];
         $username = $this->serverData['username'];
         $password = $this->serverData['password'];
 
+        $sshOptions = '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null';
         $sshCmd = sprintf(
-            'sshpass -p %s ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p %d %s@%s %s 2>/dev/null',
-            escapeshellarg($password),
+            "sshpass -p '%s' ssh -p %d %s %s@%s %s 2>/dev/null",
+            $password,
             $port,
-            escapeshellarg($username),
-            escapeshellarg($host),
+            $sshOptions,
+            $username,
+            $host,
             escapeshellarg($cmd)
         );
 
@@ -628,12 +630,158 @@ class ServerMonitoring
             }
         }
 
-        // Block collected IPs
+        // Update blocking rules
         if (!empty($ipsToBlock)) {
+            // Block collected IPs (with -reset to replace existing rule)
             $ipList = implode(' ', array_unique($ipsToBlock));
             $blockCmd = "docker exec $xrayContainer xray api sib --server=127.0.0.1:10085 -outbound=blocked -inbound=vless-in -reset $ipList";
             $this->execSSH($blockCmd);
             error_log("[Xray Enforcement] Blocked IPs: $ipList");
+        } else {
+            // No IPs to block - remove the blocking rule if it exists
+            $rmCmd = "docker exec $xrayContainer xray api rmrules --server=127.0.0.1:10085 sourceIpBlock 2>/dev/null || true";
+            $this->execSSH($rmCmd);
         }
+    }
+
+    /**
+     * Count total online clients across all Xray servers
+     * Returns array with 'total' count and 'users' list
+     */
+    public static function countOnlineClients(): array
+    {
+        $result = ['total' => 0, 'users' => []];
+        
+        // Get all active servers
+        $servers = VpnServer::listAll();
+        
+        foreach ($servers as $serverData) {
+            // Check if this is an Xray server
+            $containerName = $serverData['container_name'] ?? '';
+            if (strpos($containerName, 'xray') === false) {
+                continue;
+            }
+            
+            // Build SSH command
+            $host = $serverData['host'];
+            $port = (int)($serverData['port'] ?? 22);
+            $username = $serverData['username'] ?? 'root';
+            $password = $serverData['password'] ?? '';
+            
+            $xrayContainer = $containerName ?: 'amnezia-xray';
+            $cmd = "docker exec $xrayContainer xray api statsgetallonlineusers --server=127.0.0.1:10085";
+            
+            $sshOptions = '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5';
+            $sshCmd = sprintf(
+                "sshpass -p '%s' ssh -p %d %s %s@%s %s 2>/dev/null",
+                $password,
+                $port,
+                $sshOptions,
+                $username,
+                $host,
+                escapeshellarg($cmd)
+            );
+            
+            $output = shell_exec($sshCmd);
+            if (!$output) {
+                continue;
+            }
+            
+            $data = json_decode($output, true);
+            if (!isset($data['users']) || !is_array($data['users'])) {
+                continue;
+            }
+            
+            foreach ($data['users'] as $user) {
+                // Parse format: "user>>>email>>>online" or object with email/count
+                if (is_string($user)) {
+                    // Format: "user>>>olegtest3>>>online"
+                    $parts = explode('>>>', $user);
+                    if (count($parts) >= 2) {
+                        $email = $parts[1];
+                        $result['total'] += 1;
+                        $result['users'][] = [
+                            'server_id' => $serverData['id'],
+                            'email' => $email,
+                            'count' => 1
+                        ];
+                    }
+                } else {
+                    // Object format
+                    $email = $user['email'] ?? 'unknown';
+                    $count = (int)($user['count'] ?? 1);
+                    $result['total'] += $count;
+                    $result['users'][] = [
+                        'server_id' => $serverData['id'],
+                        'email' => $email,
+                        'count' => $count
+                    ];
+                }
+            }
+        }
+        
+        return $result;
+    }
+
+    /**
+     * Get online clients for a specific server
+     * Returns array of online client logins/emails
+     */
+    public static function getOnlineClientsForServer(array $serverData): array
+    {
+        $result = [];
+        
+        // Check if this is an Xray server
+        $containerName = $serverData['container_name'] ?? '';
+        if (strpos($containerName, 'xray') === false) {
+            return $result;
+        }
+        
+        // Build SSH command
+        $host = $serverData['host'];
+        $port = (int)($serverData['port'] ?? 22);
+        $username = $serverData['username'] ?? 'root';
+        $password = $serverData['password'] ?? '';
+        
+        $xrayContainer = $containerName ?: 'amnezia-xray';
+        $cmd = "docker exec $xrayContainer xray api statsgetallonlineusers --server=127.0.0.1:10085";
+        
+        $sshOptions = '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5';
+        $sshCmd = sprintf(
+            "sshpass -p '%s' ssh -p %d %s %s@%s %s 2>/dev/null",
+            $password,
+            $port,
+            $sshOptions,
+            $username,
+            $host,
+            escapeshellarg($cmd)
+        );
+        
+        $output = shell_exec($sshCmd);
+        if (!$output) {
+            return $result;
+        }
+        
+        $data = json_decode($output, true);
+        if (!isset($data['users']) || !is_array($data['users'])) {
+            return $result;
+        }
+        
+        foreach ($data['users'] as $user) {
+            // Parse format: "user>>>email>>>online"
+            if (is_string($user)) {
+                $parts = explode('>>>', $user);
+                if (count($parts) >= 2) {
+                    $result[] = $parts[1];
+                }
+            } else {
+                $email = $user['email'] ?? null;
+                if ($email) {
+                    $result[] = $email;
+                }
+            }
+        }
+        
+        return $result;
     }
 }

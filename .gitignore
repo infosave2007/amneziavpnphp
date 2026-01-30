@@ -66,3 +66,4 @@ restore_local.php
 test_protocols.php
 scripts/regen_qr.php
 scripts/test_xray_install.sh
+scripts/test_online.php

@@ -265,9 +265,14 @@ Router::get('/dashboard', function () {
     // Get user's clients
     $clients = VpnClient::listByUser($user['id']);
 
+    // Get real-time online clients count from Xray API
+    $onlineData = ServerMonitoring::countOnlineClients();
+
     View::render('dashboard.twig', [
         'servers' => $servers,
         'clients' => $clients,
+        'online_count' => $onlineData['total'],
+        'online_users' => $onlineData['users'],
     ]);
 });
 
@@ -845,6 +850,9 @@ Router::get('/servers/{id}', function ($params) {
             }
         }
 
+        // Get online clients for this server (Xray)
+        $onlineLogins = ServerMonitoring::getOnlineClientsForServer($serverData);
+
         View::render('servers/view.twig', [
             'server' => $serverData,
             'clients' => $clients,
@@ -852,6 +860,7 @@ Router::get('/servers/{id}', function ($params) {
             'server_protocols' => $serverProtocols,
             'selected_protocol_id' => $selectedProtocolId,
             'available_protocols' => $availableProtocols,
+            'online_logins' => $onlineLogins,
         ]);
     } catch (Exception $e) {
         error_log('Server view error: ' . $e->getMessage() . ' at ' . $e->getFile() . ':' . $e->getLine());

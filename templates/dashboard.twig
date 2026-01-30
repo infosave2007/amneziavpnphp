@@ -40,13 +40,13 @@
 
         <div class="bg-white rounded-lg shadow p-6">
             <div class="flex items-center">
-                <div class="p-3 rounded-full bg-purple-100 text-purple-600">
-                    <i class="fas fa-check-circle text-2xl"></i>
+                <div class="p-3 rounded-full bg-green-100 text-green-600">
+                    <i class="fas fa-wifi text-2xl"></i>
                 </div>
                 <div class="ml-4">
-                    <p class="text-sm font-medium text-gray-600">{{ t('dashboard.active_clients') }}</p>
+                    <p class="text-sm font-medium text-gray-600">{{ t('dashboard.online_now') }}</p>
                     <p class="text-2xl font-bold text-gray-900">
-                        {{ servers|filter(s => s.status == 'active')|length }}
+                        {{ online_count|default(0) }}
                     </p>
                 </div>
             </div>
