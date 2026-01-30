@@ -61,6 +61,11 @@ while (true) {
                     $monitoring->enforceXraySingleIpPerUser();
                 }
                 
+                // Enforce single IP per peer for AWG servers
+                if (strpos($containerName, 'awg') !== false || strpos($containerName, 'wireguard') !== false) {
+                    $monitoring->enforceAwgSingleIpPerPeer();
+                }
+                
                 // Collect server metrics
                 $serverMetrics = $monitoring->collectMetrics();
                 echo "  Server: CPU={$serverMetrics['cpu_percent']}% RAM={$serverMetrics['ram_used_mb']}/{$serverMetrics['ram_total_mb']}MB ";

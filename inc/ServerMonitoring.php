@@ -653,6 +653,129 @@ class ServerMonitoring
     }
 
     /**
+     * Enforce single IP per peer for AWG/WireGuard connections.
+     * If a peer's endpoint changes while session is active, block the new IP.
+     */
+    public function enforceAwgSingleIpPerPeer(): void
+    {
+        $containerName = $this->serverData['container_name'] ?? '';
+        if (strpos($containerName, 'awg') === false && strpos($containerName, 'wireguard') === false) {
+            return; // Not an AWG server
+        }
+
+        // Get current peer states
+        $cmd = "docker exec $containerName wg show wg0 dump";
+        $result = $this->execSSH($cmd);
+        if (!$result) {
+            return;
+        }
+
+        $lines = explode("\n", trim($result));
+        if (count($lines) < 2) {
+            return; // No peers
+        }
+
+        // Load locked endpoints from file
+        $lockFile = '/tmp/awg_locked_endpoints_' . $this->serverData['id'] . '.json';
+        $lockedEndpoints = [];
+        $lockFileCmd = "cat $lockFile 2>/dev/null || echo '{}'";
+        $lockData = $this->execSSH($lockFileCmd);
+        if ($lockData) {
+            $lockedEndpoints = json_decode($lockData, true) ?: [];
+        }
+
+        $currentPeers = [];
+        $ipsToBlock = [];
+        $now = time();
+
+        // Skip first line (interface info)
+        for ($i = 1; $i < count($lines); $i++) {
+            $parts = preg_split('/\s+/', trim($lines[$i]));
+            if (count($parts) < 8) {
+                continue;
+            }
+
+            // Format: interface pubkey psk endpoint allowed-ips latest-handshake rx tx keepalive
+            $pubkey = $parts[0];
+            $endpoint = $parts[2]; // IP:Port or (none)
+            $latestHandshake = (int)$parts[4];
+
+            if ($endpoint === '(none)' || $latestHandshake === 0) {
+                // Peer not connected - clear lock
+                unset($lockedEndpoints[$pubkey]);
+                continue;
+            }
+
+            // Extract just IP from endpoint (IP:Port)
+            $endpointIp = explode(':', $endpoint)[0];
+            $isActive = ($now - $latestHandshake) < 180; // Active if handshake within 3 minutes
+
+            $currentPeers[$pubkey] = $endpointIp;
+
+            if ($isActive) {
+                if (!isset($lockedEndpoints[$pubkey])) {
+                    // First connection - lock this IP
+                    $lockedEndpoints[$pubkey] = $endpointIp;
+                } elseif ($lockedEndpoints[$pubkey] !== $endpointIp) {
+                    // Endpoint changed during active session - block new IP
+                    $ipsToBlock[] = $endpointIp;
+                    error_log("[AWG Enforcement] Peer $pubkey changed endpoint from {$lockedEndpoints[$pubkey]} to $endpointIp - blocking");
+                }
+            } else {
+                // Session expired - update locked endpoint for next connection
+                $lockedEndpoints[$pubkey] = $endpointIp;
+            }
+        }
+
+        // Clean up locks for peers that no longer exist
+        foreach ($lockedEndpoints as $pubkey => $ip) {
+            if (!isset($currentPeers[$pubkey])) {
+                unset($lockedEndpoints[$pubkey]);
+            }
+        }
+
+        // Save locked endpoints
+        $lockJson = json_encode($lockedEndpoints);
+        $saveLockCmd = "echo " . escapeshellarg($lockJson) . " > $lockFile";
+        $this->execSSH($saveLockCmd);
+
+        // Apply iptables rules for blocked IPs
+        if (!empty($ipsToBlock)) {
+            foreach ($ipsToBlock as $ip) {
+                // Block UDP traffic from this IP to WireGuard port
+                $wgPort = $this->serverData['vpn_port'] ?? 51820;
+                $blockCmd = "docker exec $containerName iptables -C INPUT -s $ip -p udp --dport $wgPort -j DROP 2>/dev/null || docker exec $containerName iptables -I INPUT -s $ip -p udp --dport $wgPort -j DROP";
+                $this->execSSH($blockCmd);
+            }
+        }
+
+        // Remove blocks for IPs that are now the locked endpoint (old device disconnected)
+        $wgPort = $this->serverData['vpn_port'] ?? 51820;
+        $listRulesCmd = "docker exec $containerName iptables -L INPUT -n --line-numbers | grep 'DROP.*udp dpt:$wgPort' | awk '{print \$1, \$4}'";
+        $rulesResult = $this->execSSH($listRulesCmd);
+        if ($rulesResult) {
+            $rulesToRemove = [];
+            foreach (explode("\n", trim($rulesResult)) as $line) {
+                $parts = preg_split('/\s+/', trim($line));
+                if (count($parts) >= 2) {
+                    $ruleNum = $parts[0];
+                    $blockedIp = $parts[1];
+                    // If this IP is now the locked endpoint for any peer, remove the block
+                    if (in_array($blockedIp, $lockedEndpoints)) {
+                        $rulesToRemove[] = $ruleNum;
+                    }
+                }
+            }
+            // Remove rules in reverse order (highest number first)
+            rsort($rulesToRemove);
+            foreach ($rulesToRemove as $ruleNum) {
+                $rmCmd = "docker exec $containerName iptables -D INPUT $ruleNum 2>/dev/null || true";
+                $this->execSSH($rmCmd);
+            }
+        }
+    }
+
+    /**
      * Count total online clients across all Xray servers
      * Returns array with 'total' count and 'users' list
      */
