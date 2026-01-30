@@ -1246,28 +1246,92 @@ class InstallProtocolManager
 
         // Check if client exists
         $clients = &$config['inbounds'][0]['settings']['clients'];
-        foreach ($clients as $c) {
+        $duplicateFound = false;
+        foreach ($clients as $k => $c) {
             if (($c['id'] ?? '') === $clientId) {
-                // Already exists
+                // Already exists by ID (exact match)
                 Logger::appendInstall($server->getId(), "Client $clientId already exists in X-Ray config");
                 return ['success' => true, 'message' => 'Client already exists'];
             }
-        }
+            if (($c['email'] ?? '') === (!empty($options['login']) ? $options['login'] : $clientId)) {
+                // Email conflict! (Different ID but same email)
+                // This happens if user re-adds a client with same login but new UUID (after deleting from DB)
+                Logger::appendInstall($server->getId(), "Client email already exists in X-Ray config. Updating ID/Level.");
 
-        // Add client
-        $email = !empty($options['login']) ? $options['login'] : $clientId;
-        $newClient = ['id' => $clientId, 'email' => $email];
+                // Update existing client entry with new UUID
+                $clients[$k]['id'] = $clientId;
+                $clients[$k]['level'] = 0; // Ensure level 0
 
-        // Detect flow from other clients or default
-        $flow = 'xtls-rprx-vision'; // Default for Reality
-        if (!empty($clients)) {
-            if (isset($clients[0]['flow'])) {
-                $flow = $clients[0]['flow'];
+                $duplicateFound = true;
+                break;
             }
         }
-        $newClient['flow'] = $flow;
 
-        $clients[] = $newClient;
+        if (!$duplicateFound) {
+            // Add new client (no conflict)
+            $email = !empty($options['login']) ? $options['login'] : $clientId;
+            $newClient = ['id' => $clientId, 'email' => $email];
+
+            // Detect flow from other clients or default
+            $flow = 'xtls-rprx-vision'; // Default for Reality
+            if (!empty($clients)) {
+                if (isset($clients[0]['flow'])) {
+                    $flow = $clients[0]['flow'];
+                }
+            }
+            $newClient['flow'] = $flow;
+            $newClient['level'] = 0; // Explicitly set level 0
+
+            $clients[] = $newClient;
+        }
+
+        // Fix JSON encoding issues (empty objects becoming arrays)
+        if (isset($config['stats']) && empty($config['stats'])) {
+            $config['stats'] = new stdClass();
+        }
+        if (isset($config['policy']['levels']) && is_array($config['policy']['levels'])) {
+            // Check if it's an indexed array (0, 1...) which is wrong for X-ray levels map
+            if (array_keys($config['policy']['levels']) === range(0, count($config['policy']['levels']) - 1)) {
+                $newLevels = new stdClass();
+                foreach ($config['policy']['levels'] as $idx => $lvl) {
+                    $newLevels->{(string) $idx} = $lvl;
+                }
+                $config['policy']['levels'] = $newLevels;
+            } elseif (empty($config['policy']['levels'])) {
+                $config['policy']['levels'] = new stdClass();
+            }
+        } else {
+            if (!isset($config['policy'])) {
+                $config['policy'] = new stdClass();
+            }
+            if (!isset($config['policy']['levels'])) {
+                $config['policy']['levels'] = new stdClass();
+            }
+        }
+
+        // Enforce Level 0 Policy with limitIp
+        if (!isset($config['policy']['levels']->{'0'})) {
+            $config['policy']['levels']->{'0'} = new stdClass();
+        }
+        $level0 = $config['policy']['levels']->{'0'};
+        // Cast to object if array
+        if (is_array($level0)) {
+            $level0 = (object) $level0;
+            $config['policy']['levels']->{'0'} = $level0;
+        }
+
+        // Set restriction parameters
+        $level0->limitIp = 1;
+        $level0->handshake = 4;
+        $level0->connIdle = 300;
+        $level0->uplinkOnly = 2;
+        $level0->downlinkOnly = 5;
+        $level0->statsUserUplink = true;
+        $level0->statsUserDownlink = true;
+        $level0->bufferSize = 4;
+        // It's an assoc array, duplicate it to stdClass to ensure object encoding
+        $config['policy']['levels'] = (object) $config['policy']['levels'];
+
 
         // 3. Write config back
         $newJson = json_encode($config, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);

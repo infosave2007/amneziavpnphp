@@ -301,18 +301,18 @@
                 <span class="text-gray-600">{{ client.expires_at|date('Y-m-d') }}</span>
               {% endif %}
             {% else %}
-              <span class="text-gray-400">{{ t('clients.never_expires') }}</span>
+              <span class="text-green-500 text-xl" title="{{ t('clients.never_expires') }}">&infin;</span>
             {% endif %}
           </td>
-          <td class="px-6 py-4 text-sm">
-            <div class="text-gray-600">
-              ↑ {{ (client.bytes_sent|default(0) / 1024 / 1024)|number_format(2) }} MB
+          <td class="px-2 py-2 text-xs">
+            <div class="text-gray-600 font-mono">
+              ↑{{ (client.bytes_sent|default(0) / 1024 / 1024)|number_format(2) }} MB
             </div>
-            <div class="text-gray-600">
-              ↓ {{ (client.bytes_received|default(0) / 1024 / 1024)|number_format(2) }} MB
+            <div class="text-gray-600 font-mono">
+              ↓{{ (client.bytes_received|default(0) / 1024 / 1024)|number_format(2) }} MB
             </div>
           </td>
-          <td class="px-6 py-4 text-sm">
+          <td class="px-2 py-2 text-xs text-center">
             {% if client.traffic_limit %}
               {% set total_traffic = (client.bytes_sent|default(0) + client.bytes_received|default(0)) %}
               {% set limit_gb = (client.traffic_limit / 1073741824)|number_format(2) %}
@@ -320,29 +320,35 @@
               {% set percentage = ((total_traffic / client.traffic_limit) * 100)|round %}
               
               {% if percentage >= 100 %}
-                <span class="px-2 py-1 bg-red-100 text-red-800 rounded text-xs">
+                <span class="px-2 py-1 bg-red-100 text-red-800 rounded">
                   <i class="fas fa-exclamation-circle"></i> {{ t('clients.overlimit') }}
                 </span>
               {% elseif percentage >= 80 %}
-                <span class="px-2 py-1 bg-yellow-100 text-yellow-800 rounded text-xs">
+                <span class="px-2 py-1 bg-yellow-100 text-yellow-800 rounded">
                   {{ used_gb }} / {{ limit_gb }} GB ({{ percentage }}%)
                 </span>
               {% else %}
                 <span class="text-gray-600">{{ used_gb }} / {{ limit_gb }} GB</span>
               {% endif %}
             {% else %}
-              <span class="text-gray-400">{{ t('clients.unlimited') }}</span>
+              <span class="text-green-500 text-lg" title="{{ t('clients.unlimited') }}">&infin;</span>
             {% endif %}
           </td>
-          <td class="px-6 py-4 text-sm">
-            <div id="client-speed-{{ client.id }}" class="text-gray-600 text-xs">
-              <span class="text-green-600">↑ {{ (client.speed_up|default(0) / 1024)|number_format(1) }} KB/s</span><br>
-              <span class="text-blue-600">↓ {{ (client.speed_down|default(0) / 1024)|number_format(1) }} KB/s</span>
+          <td class="px-2 py-2 text-xs">
+            <div class="flex flex-col items-center" style="width: 120px; max-width: 120px;">
+              <div style="height: 30px; width: 100%;">
+                <canvas id="clientSparkline-{{ client.id }}"></canvas>
+              </div>
+              <div id="client-speed-{{ client.id }}" class="text-gray-600 text-[10px] mt-1 font-mono text-center leading-tight">
+                <div class="text-green-600 whitespace-nowrap">↑{{ ((client.speed_up|default(0) * 8) / 1000000)|number_format(2) }} Mbit</div>
+                <div class="text-blue-600 whitespace-nowrap">↓{{ ((client.speed_down|default(0) * 8) / 1000000)|number_format(2) }} Mbit</div>
+              </div>
             </div>
           </td>
-          <td class="px-6 py-4 text-sm">
+          <td class="px-2 py-2 text-xs whitespace-nowrap text-right">
             {% if client.last_handshake %}
-              <span class="text-gray-600">{{ client.last_handshake }}</span>
+              <span class="text-gray-600 block">{{ client.last_handshake|split(' ')|first }}</span>
+              <span class="text-gray-400 block">{{ client.last_handshake|split(' ')|last }}</span>
             {% else %}
               <span class="text-gray-400">{{ t('clients.never') }}</span>
             {% endif %}
@@ -867,39 +873,99 @@ if (document.getElementById('cpuSparkline')) {
 }
 
 // Update client speeds
+let clientCharts = {};
+
 async function updateClientSpeeds() {
   const clientRows = document.querySelectorAll('[id^="client-speed-"]');
   
-  console.log('Found client speed rows:', clientRows.length);
-  
   for (const row of clientRows) {
     const clientId = row.id.replace('client-speed-', '');
-    
-    console.log(`Fetching metrics for client ${clientId}`);
+    const canvasId = `clientSparkline-${clientId}`;
+    const canvas = document.getElementById(canvasId);
     
     try {
-      const response = await fetch(`/api/clients/${clientId}/metrics?hours=1`, {
+      const response = await fetch(`/api/clients/${clientId}/metrics?hours=24`, { // Fetch 24h for sparkline
         credentials: 'same-origin'
       });
       
       const data = await response.json();
       
-      console.log(`Client ${clientId} metrics:`, data);
-      
-      if (data.success && data.metrics && data.metrics.length > 0) {
-        const latest = data.metrics[data.metrics.length - 1];
-        const speedUp = parseFloat(latest.speed_up_kbps).toFixed(1);
-        const speedDown = parseFloat(latest.speed_down_kbps).toFixed(1);
+      if (data.success && data.metrics) {
+        const metrics = data.metrics; // Use all points for chart
         
-        // Format as compact badge
-        row.innerHTML = `<span class="text-xs text-gray-700">↑${speedUp} ↓${speedDown} KB/s</span>`;
+        // 1. Render/Update Chart
+        if (canvas) {
+           const labels = metrics.map((_, i) => i);
+           const dataUp = metrics.map(m => (parseFloat(m.speed_up_kbps) / 1000)); // Mbps
+           const dataDown = metrics.map(m => (parseFloat(m.speed_down_kbps) / 1000)); // Mbps
+           
+           if (clientCharts[clientId]) {
+               // Update existing chart
+               clientCharts[clientId].data.labels = labels;
+               clientCharts[clientId].data.datasets[0].data = dataUp;
+               clientCharts[clientId].data.datasets[1].data = dataDown;
+               clientCharts[clientId].update('none');
+           } else {
+               // Create new chart
+               clientCharts[clientId] = new Chart(canvas, {
+                   type: 'line',
+                   data: {
+                       labels: labels,
+                       datasets: [
+                           {
+                               label: 'Up',
+                               data: dataUp,
+                               borderColor: '#16a34a', // green-600
+                               borderWidth: 1.5,
+                               pointRadius: 0,
+                               fill: false,
+                               tension: 0.4
+                           },
+                           {
+                               label: 'Down',
+                               data: dataDown,
+                               borderColor: '#2563eb', // blue-600
+                               borderWidth: 1.5,
+                               pointRadius: 0,
+                               fill: false,
+                               tension: 0.4
+                           }
+                       ]
+                   },
+                   options: {
+                       responsive: true,
+                       maintainAspectRatio: false,
+                       plugins: { legend: { display: false }, tooltip: { enabled: false } },
+                       scales: {
+                           x: { display: false },
+                           y: { display: false, beginAtZero: true }
+                       },
+                       animation: false
+                   }
+               });
+           }
+        }
+
+        // 2. Update Text Badge (Last Known Speed)
+        if (metrics.length > 0) {
+            const latest = metrics[metrics.length - 1];
+            const speedUp = (parseFloat(latest.speed_up_kbps) / 1000).toFixed(2);
+            const speedDown = (parseFloat(latest.speed_down_kbps) / 1000).toFixed(2);
+            
+            row.innerHTML = `
+                <div class="text-green-600 whitespace-nowrap">↑${speedUp} Mbit</div>
+                <div class="text-blue-600 whitespace-nowrap">↓${speedDown} Mbit</div>
+            `;
+        } else {
+            row.innerHTML = '<span class="text-gray-400">-</span>';
+        }
+
       } else {
-        console.log(`No metrics for client ${clientId}`);
         row.innerHTML = '<span class="text-xs text-gray-400">-</span>';
       }
     } catch (error) {
       console.error(`Failed to fetch metrics for client ${clientId}:`, error);
-      row.innerHTML = '<span class="text-xs text-gray-400">-</span>';
+      row.innerHTML = '<span class="text-xs text-gray-400">Error</span>';
     }
   }
 }
