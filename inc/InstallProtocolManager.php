@@ -1222,15 +1222,49 @@ class InstallProtocolManager
             $config['policy']['levels']['0'] = [];
         }
 
-        // Enforce limitIp: 1 for user level 0
+        // Enforce stats and online tracking for user level 0
         $config['policy']['levels']['0']['handshake'] = 4;
         $config['policy']['levels']['0']['connIdle'] = 300;
         $config['policy']['levels']['0']['uplinkOnly'] = 2;
         $config['policy']['levels']['0']['downlinkOnly'] = 5;
         $config['policy']['levels']['0']['statsUserUplink'] = true;
         $config['policy']['levels']['0']['statsUserDownlink'] = true;
+        $config['policy']['levels']['0']['statsUserOnline'] = true; // Enable online tracking
         $config['policy']['levels']['0']['bufferSize'] = 4;
-        $config['policy']['levels']['0']['limitIp'] = 1; // Enforce 1 IP per user
+
+        // Ensure API services include StatsService and RoutingService
+        if (!isset($config['api'])) {
+            $config['api'] = ['tag' => 'api', 'services' => []];
+        }
+        if (!isset($config['api']['services'])) {
+            $config['api']['services'] = [];
+        }
+        if (!in_array('StatsService', $config['api']['services'])) {
+            $config['api']['services'][] = 'StatsService';
+        }
+        if (!in_array('RoutingService', $config['api']['services'])) {
+            $config['api']['services'][] = 'RoutingService';
+        }
+
+        // Ensure blocked outbound exists for IP blocking
+        if (!isset($config['outbounds'])) {
+            $config['outbounds'] = [];
+        }
+        $hasBlocked = false;
+        foreach ($config['outbounds'] as $ob) {
+            if (($ob['tag'] ?? '') === 'blocked') {
+                $hasBlocked = true;
+                break;
+            }
+        }
+        if (!$hasBlocked) {
+            $config['outbounds'][] = ['protocol' => 'blackhole', 'tag' => 'blocked'];
+        }
+
+        // Ensure main inbound has a tag for routing rules
+        if (!isset($config['inbounds'][0]['tag'])) {
+            $config['inbounds'][0]['tag'] = 'vless-in';
+        }
 
         // Assuming VLESS structure: inbounds[0] -> settings -> clients
 
@@ -1309,7 +1343,7 @@ class InstallProtocolManager
             }
         }
 
-        // Enforce Level 0 Policy with limitIp
+        // Enforce Level 0 Policy with online tracking
         if (!isset($config['policy']['levels']->{'0'})) {
             $config['policy']['levels']->{'0'} = new stdClass();
         }
@@ -1320,14 +1354,14 @@ class InstallProtocolManager
             $config['policy']['levels']->{'0'} = $level0;
         }
 
-        // Set restriction parameters
-        $level0->limitIp = 1;
+        // Set restriction parameters (statsUserOnline enables connection counting)
         $level0->handshake = 4;
         $level0->connIdle = 300;
         $level0->uplinkOnly = 2;
         $level0->downlinkOnly = 5;
         $level0->statsUserUplink = true;
         $level0->statsUserDownlink = true;
+        $level0->statsUserOnline = true; // Enable online tracking for enforcement
         $level0->bufferSize = 4;
         // It's an assoc array, duplicate it to stdClass to ensure object encoding
         $config['policy']['levels'] = (object) $config['policy']['levels'];

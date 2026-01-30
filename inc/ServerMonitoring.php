@@ -34,9 +34,12 @@ class ServerMonitoring
         }
 
         // Use --reset=true to get delta since last check and prevent counter reset on restart
-        // Note: The container name is hardcoded to 'amnezia-xray' in the provided snippet.
-        // Assuming this is intentional or will be corrected by the user later.
-        $cmd = "docker exec amnezia-xray xray api statsquery --pattern 'user>>>' --reset=true --server=127.0.0.1:10085";
+        $xrayContainer = $this->getXrayContainerName();
+        if (!$xrayContainer) {
+            $this->xrayStatsFetched = true;
+            return true; // Not an Xray server
+        }
+        $cmd = "docker exec $xrayContainer xray api statsquery --pattern 'user>>>' --reset=true --server=127.0.0.1:10085";
         $json = $this->execSSH($cmd);
 
         if (!$json || trim($json) === '') {
@@ -109,6 +112,15 @@ class ServerMonitoring
      */
     public function collectClientMetrics(): array
     {
+        // Enforce single IP per user for Xray before collecting stats
+        if ($this->isXrayServer()) {
+            try {
+                $this->enforceXraySingleIpPerUser();
+            } catch (Throwable $e) {
+                error_log("Xray enforcement error: " . $e->getMessage());
+            }
+        }
+
         // Pre-fetch X-ray stats
         if (!$this->fetchXrayStats()) {
             error_log("Failed to fetch X-ray stats, preventing DB overwrite");
@@ -529,5 +541,99 @@ class ServerMonitoring
         $output = shell_exec($sshCmd);
 
         return $output ?: null;
+    }
+
+    /**
+     * Get Xray container name for this server
+     * @return string|null Container name or null if not an Xray server
+     */
+    private function getXrayContainerName(): ?string
+    {
+        $containerName = $this->serverData['container_name'] ?? '';
+        // Check if this is an Xray server
+        if (stripos($containerName, 'xray') !== false) {
+            return $containerName;
+        }
+        // Also check slug
+        $slug = $this->serverData['slug'] ?? '';
+        if (stripos($slug, 'xray') !== false || stripos($slug, 'vless') !== false) {
+            return $containerName ?: 'amnezia-xray';
+        }
+        return null;
+    }
+
+    /**
+     * Check if this server is an Xray server
+     */
+    private function isXrayServer(): bool
+    {
+        return $this->getXrayContainerName() !== null;
+    }
+
+    /**
+     * Enforce single IP per user for Xray connections
+     * If a user is connected from multiple IPs, block all but the first one
+     */
+    public function enforceXraySingleIpPerUser(): void
+    {
+        $xrayContainer = $this->getXrayContainerName();
+        if (!$xrayContainer) {
+            return; // Not an Xray server
+        }
+
+        // Get all online users
+        $cmd = "docker exec $xrayContainer xray api statsgetallonlineusers --server=127.0.0.1:10085";
+        $result = $this->execSSH($cmd);
+        if (!$result) {
+            return;
+        }
+
+        $data = json_decode($result, true);
+        if (!isset($data['users']) || !is_array($data['users'])) {
+            return;
+        }
+
+        $ipsToBlock = [];
+
+        foreach ($data['users'] as $user) {
+            $email = $user['email'] ?? null;
+            if (!$email) {
+                continue;
+            }
+
+            // Get IP list for this user
+            $ipCmd = "docker exec $xrayContainer xray api statsonlineiplist --server=127.0.0.1:10085 --email=" . escapeshellarg($email);
+            $ipResult = $this->execSSH($ipCmd);
+            if (!$ipResult) {
+                continue;
+            }
+
+            $ipData = json_decode($ipResult, true);
+            if (!isset($ipData['ips']) || !is_array($ipData['ips'])) {
+                continue;
+            }
+
+            // If more than 1 IP, block all but the first (oldest by timestamp)
+            if (count($ipData['ips']) > 1) {
+                // Sort by timestamp (value) ascending
+                asort($ipData['ips']);
+                $first = true;
+                foreach ($ipData['ips'] as $ip => $timestamp) {
+                    if ($first) {
+                        $first = false;
+                        continue; // Keep first IP
+                    }
+                    $ipsToBlock[] = $ip;
+                }
+            }
+        }
+
+        // Block collected IPs
+        if (!empty($ipsToBlock)) {
+            $ipList = implode(' ', array_unique($ipsToBlock));
+            $blockCmd = "docker exec $xrayContainer xray api sib --server=127.0.0.1:10085 -outbound=blocked -inbound=vless-in -reset $ipList";
+            $this->execSSH($blockCmd);
+            error_log("[Xray Enforcement] Blocked IPs: $ipList");
+        }
     }
 }
