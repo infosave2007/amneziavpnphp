@@ -2401,6 +2401,40 @@ Router::get('/api/servers/{id}/clients', function ($params) {
     }
 });
 
+// API: Get online clients for a server (real-time)
+Router::get('/api/servers/{id}/online', function ($params) {
+    header('Content-Type: application/json');
+
+    $user = authenticateRequest();
+    if (!$user) {
+        http_response_code(401);
+        echo json_encode(['error' => 'Unauthorized']);
+        return;
+    }
+
+    $serverId = (int) $params['id'];
+
+    try {
+        $server = new VpnServer($serverId);
+        $serverData = $server->getData();
+
+        // Check ownership
+        if ($serverData['user_id'] != $user['id'] && $user['role'] !== 'admin') {
+            http_response_code(403);
+            echo json_encode(['error' => 'Forbidden']);
+            return;
+        }
+
+        require_once __DIR__ . '/../inc/ServerMonitoring.php';
+        $onlineLogins = ServerMonitoring::getOnlineClientsForServer($serverData);
+
+        echo json_encode(['success' => true, 'online' => $onlineLogins]);
+    } catch (Exception $e) {
+        http_response_code(500);
+        echo json_encode(['error' => $e->getMessage()]);
+    }
+});
+
 // API: List server protocols
 Router::get('/api/servers/{id}/protocols', function ($params) {
     header('Content-Type: application/json');

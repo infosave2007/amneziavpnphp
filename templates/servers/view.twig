@@ -276,13 +276,13 @@
             {% endif %}
           </td>
           <td class="px-6 py-4">{{ client.client_ip }}</td>
-          <td class="px-6 py-4">
+          <td class="px-6 py-4" data-client-name="{{ client.name }}" data-client-status="{{ client.status }}">
             {% if client.name in online_logins %}
-              <span class="px-2 py-1 bg-green-100 text-green-800 rounded text-xs"><i class="fas fa-wifi mr-1"></i>Online</span>
+              <span class="online-badge px-2 py-1 bg-green-100 text-green-800 rounded text-xs"><i class="fas fa-wifi mr-1"></i>Online</span>
             {% elseif client.status == 'active' %}
-              <span class="px-2 py-1 bg-gray-100 text-gray-600 rounded text-xs">{{ t('status.active') }}</span>
+              <span class="status-badge px-2 py-1 bg-gray-100 text-gray-600 rounded text-xs">{{ t('status.active') }}</span>
             {% else %}
-              <span class="px-2 py-1 bg-red-100 text-red-800 rounded text-xs">{{ t('status.disabled') }}</span>
+              <span class="status-badge px-2 py-1 bg-red-100 text-red-800 rounded text-xs">{{ t('status.disabled') }}</span>
             {% endif %}
           </td>
           <td class="px-6 py-4 text-sm">
@@ -977,6 +977,38 @@ if (document.querySelector('[id^="client-speed-"]')) {
   updateClientSpeeds();
   setInterval(updateClientSpeeds, 30000);
 }
+
+// Real-time online status updates
+async function updateOnlineStatus() {
+  const serverId = {{ server.id }};
+  try {
+    const response = await fetch(`/api/servers/${serverId}/online`, {
+      credentials: 'same-origin'
+    });
+    if (!response.ok) return;
+    const data = await response.json();
+    if (!data.success) return;
+    
+    const onlineSet = new Set(data.online);
+    document.querySelectorAll('td[data-client-name]').forEach(cell => {
+      const clientName = cell.dataset.clientName;
+      const clientStatus = cell.dataset.clientStatus;
+      
+      if (onlineSet.has(clientName)) {
+        cell.innerHTML = '<span class="online-badge px-2 py-1 bg-green-100 text-green-800 rounded text-xs"><i class="fas fa-wifi mr-1"></i>Online</span>';
+      } else if (clientStatus === 'active') {
+        cell.innerHTML = '<span class="status-badge px-2 py-1 bg-gray-100 text-gray-600 rounded text-xs">{{ t("status.active") }}</span>';
+      } else {
+        cell.innerHTML = '<span class="status-badge px-2 py-1 bg-red-100 text-red-800 rounded text-xs">{{ t("status.disabled") }}</span>';
+      }
+    });
+  } catch (e) {
+    console.error('Failed to update online status:', e);
+  }
+}
+
+// Poll every 5 seconds
+setInterval(updateOnlineStatus, 5000);
 {% endif %}
 </script>
 {% endblock %}
