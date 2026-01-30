@@ -184,15 +184,56 @@ class ServerMonitoring
 
         // Get current stats from server
         $containerName = $this->serverData['container_name'];
-        $publicKey = $client['public_key'];
+        $bytesReceived = 0;
+        $bytesSent = 0;
 
-        $cmd = "docker exec {$containerName} wg show all dump | grep '{$publicKey}' | awk '{print \$6, \$7}'";
-        $result = $this->execSSH($cmd);
+        if (strpos($containerName, 'xray') !== false) {
+            // X-Ray Logic
+            $identifier = null;
+            // Best effort to find UUID/Email
+            if (!empty($client['config']) && preg_match('/vless:\\/\\/([0-9a-fA-F-]{36})@/i', $client['config'], $m)) {
+                $identifier = $m[1];
+            } elseif (!empty($client['name'])) { // Often name IS the UUID for XRay
+                $identifier = $client['name'];
+            }
 
-        if (!$result)
-            return null;
+            if ($identifier) {
+                // Query X-Ray API
+                $cmd = sprintf(
+                    "docker exec %s xray api statsquery --server=127.0.0.1:10085 --pattern 'user>>>%s>>>traffic>>>' 2>/dev/null",
+                    escapeshellarg($containerName),
+                    escapeshellarg($identifier)
+                );
 
-        list($bytesReceived, $bytesSent) = explode(' ', trim($result));
+                $json = $this->execSSH($cmd);
+                if ($json) {
+                    $data = json_decode($json, true);
+                    if (isset($data['stat']) && is_array($data['stat'])) {
+                        foreach ($data['stat'] as $row) {
+                            if (strpos($row['name'], '>>>uplink') !== false) {
+                                // value is accumulated bytes
+                                $bytesSent = (int) $row['value'];
+                            }
+                            if (strpos($row['name'], '>>>downlink') !== false) {
+                                $bytesReceived = (int) $row['value'];
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            // WireGuard Logic
+            $publicKey = $client['public_key'];
+            $cmd = "docker exec {$containerName} wg show all dump | grep '{$publicKey}' | awk '{print \$6, \$7}'";
+            $result = $this->execSSH($cmd);
+
+            if ($result) {
+                list($bytesReceived, $bytesSent) = explode(' ', trim($result));
+            }
+        }
+
+        // If we couldn't get stats (and they are 0), check if we have previous stats to avoid zeroing out if API fails?
+        // But for speed calc we need current values.
 
         // Get previous metrics (30 seconds ago)
         $stmt = $db->prepare("
@@ -210,13 +251,19 @@ class ServerMonitoring
 
         if ($previous) {
             $timeDiff = time() - strtotime($previous['collected_at']);
-            if ($timeDiff > 0) {
+            // Check for reasonable time diff to avoid division by zero or huge spikes
+            if ($timeDiff > 0 && $timeDiff < 300) {
                 // Calculate speed in Kbps
                 $bytesDiffSent = (int) $bytesSent - (int) $previous['bytes_sent'];
                 $bytesDiffReceived = (int) $bytesReceived - (int) $previous['bytes_received'];
 
-                $speedUp = round(($bytesDiffSent * 8) / $timeDiff / 1000, 2);
-                $speedDown = round(($bytesDiffReceived * 8) / $timeDiff / 1000, 2);
+                // Allow for some jitter/counter resets (ignore negative speed which means restart)
+                if ($bytesDiffSent >= 0) {
+                    $speedUp = round(($bytesDiffSent * 8) / $timeDiff / 1000, 2);
+                }
+                if ($bytesDiffReceived >= 0) {
+                    $speedDown = round(($bytesDiffReceived * 8) / $timeDiff / 1000, 2);
+                }
             }
         }
 
