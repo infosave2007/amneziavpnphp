@@ -220,6 +220,13 @@ class VpnClient
                         }
                     }
                 }
+
+                // CRITICAL FIX: Do NOT inherit client_id from server installation data (server_protocols).
+                // This prevents new clients from duplicating the admin's UUID.
+                if (isset($vars['client_id']) && (stripos($slug, 'xray') !== false || stripos($slug, 'vless') !== false)) {
+                    unset($vars['client_id']);
+                }
+
                 if (isset($vars['publickey']) && empty($vars['reality_public_key'])) {
                     $vars['reality_public_key'] = $vars['publickey'];
                 }
