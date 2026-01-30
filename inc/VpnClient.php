@@ -268,14 +268,15 @@ class VpnClient
                         if (is_array($decoded)) {
                             $inbounds = $decoded['inbounds'] ?? [];
                             if (is_array($inbounds) && !empty($inbounds)) {
-                                $settings = $inbounds[0]['settings'] ?? [];
-                                $clients = $settings['clients'] ?? [];
-                                if (is_array($clients) && !empty($clients)) {
-                                    $cid = $clients[0]['id'] ?? null;
-                                    if (is_string($cid) && $cid !== '' && empty($vars['client_id'])) {
-                                        $vars['client_id'] = $cid;
-                                    }
-                                }
+                                // Block removed: Do not reuse existing client ID for new clients
+                                // $settings = $inbounds[0]['settings'] ?? [];
+                                // $clients = $settings['clients'] ?? [];
+                                // if (is_array($clients) && !empty($clients)) {
+                                //    $cid = $clients[0]['id'] ?? null;
+                                //    if (is_string($cid) && $cid !== '' && empty($vars['client_id'])) {
+                                //        $vars['client_id'] = $cid;
+                                //    }
+                                // }
                                 $stream = $inbounds[0]['streamSettings'] ?? [];
                                 if (is_array($stream) && ($stream['security'] ?? '') === 'reality') {
                                     $rs = $stream['realitySettings'] ?? [];
