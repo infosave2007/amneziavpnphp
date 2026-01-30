@@ -275,9 +275,9 @@ class ServerMonitoring
         $bytesReceived = 0;
         $bytesSent = 0;
 
-        $slug = $this->serverData['slug']; // Assuming 'slug' is available in serverData
+        $protocol = $this->serverData['install_protocol'] ?? '';
 
-        if ($slug === 'xray' || $slug === 'vless') {
+        if (strpos($protocol, 'xray') !== false || strpos($protocol, 'vless') !== false) {
             // Retrieve DELTA from cache
             if ($this->xrayStatsFetched) {
                 // Try to find by UUID first (if we tracked it) or Email/Name
@@ -556,9 +556,9 @@ class ServerMonitoring
         if (stripos($containerName, 'xray') !== false) {
             return $containerName;
         }
-        // Also check slug
-        $slug = $this->serverData['slug'] ?? '';
-        if (stripos($slug, 'xray') !== false || stripos($slug, 'vless') !== false) {
+        // Also check protocol
+        $protocol = $this->serverData['install_protocol'] ?? '';
+        if (stripos($protocol, 'xray') !== false || stripos($protocol, 'vless') !== false) {
             return $containerName ?: 'amnezia-xray';
         }
         return null;
@@ -598,7 +598,15 @@ class ServerMonitoring
         $ipsToBlock = [];
 
         foreach ($data['users'] as $user) {
-            $email = $user['email'] ?? null;
+            // Format: "user>>>email>>>online"
+            if (!is_string($user)) {
+                continue;
+            }
+            $parts = explode('>>>', $user);
+            if (count($parts) < 2) {
+                continue;
+            }
+            $email = $parts[1];
             if (!$email) {
                 continue;
             }

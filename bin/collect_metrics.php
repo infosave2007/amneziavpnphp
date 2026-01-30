@@ -55,6 +55,12 @@ while (true) {
                 
                 $monitoring = new ServerMonitoring($server['id']);
                 
+                // Enforce single IP per user for Xray servers
+                $containerName = $server['container_name'] ?? '';
+                if (strpos($containerName, 'xray') !== false) {
+                    $monitoring->enforceXraySingleIpPerUser();
+                }
+                
                 // Collect server metrics
                 $serverMetrics = $monitoring->collectMetrics();
                 echo "  Server: CPU={$serverMetrics['cpu_percent']}% RAM={$serverMetrics['ram_used_mb']}/{$serverMetrics['ram_total_mb']}MB ";
