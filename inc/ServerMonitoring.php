@@ -211,7 +211,6 @@ class ServerMonitoring
                     if (isset($data['stat']) && is_array($data['stat'])) {
                         foreach ($data['stat'] as $row) {
                             if (strpos($row['name'], '>>>uplink') !== false) {
-                                // value is accumulated bytes
                                 $bytesSent = (int) $row['value'];
                             }
                             if (strpos($row['name'], '>>>downlink') !== false) {
@@ -219,6 +218,8 @@ class ServerMonitoring
                             }
                         }
                     }
+                } else {
+                    // SSH command failed or returned empty for X-Ray stats
                 }
             }
         } else {
