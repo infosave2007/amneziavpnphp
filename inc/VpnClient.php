@@ -1529,6 +1529,17 @@ class VpnClient
         }
 
         try {
+            // Get previous stats for speed calculation
+            $pdo = DB::conn();
+            $stmtPrev = $pdo->prepare('SELECT bytes_sent, bytes_received, last_sync_at, last_handshake FROM vpn_clients WHERE id = ?');
+            $stmtPrev->execute([$this->clientId]);
+            $prev = $stmtPrev->fetch();
+
+            $prevSent = (int) ($prev['bytes_sent'] ?? 0);
+            $prevReceived = (int) ($prev['bytes_received'] ?? 0);
+            $prevSyncAt = $prev['last_sync_at'] ? strtotime($prev['last_sync_at']) : 0;
+            $prevHandshake = $prev['last_handshake'] ? strtotime($prev['last_handshake']) : 0;
+
             // XRay stats logic
             $stats = [];
 
@@ -1547,6 +1558,14 @@ class VpnClient
 
                 if ($identifier) {
                     $stats = self::getXrayStats($serverData, $identifier);
+                    // Infer online status for XRay: if traffic increased, they are online.
+                    // Update last_handshake to NOW() if activity detected.
+                    if ($stats['bytes_sent'] > $prevSent || $stats['bytes_received'] > $prevReceived) {
+                        $stats['last_handshake'] = time();
+                    } else {
+                        // Keep previous handshake if no new activity
+                        $stats['last_handshake'] = $prevHandshake;
+                    }
                 }
 
             }
@@ -1555,10 +1574,36 @@ class VpnClient
                 $stats = self::getClientStatsFromServer($serverData, $this->data['public_key']);
             }
 
-            $pdo = DB::conn();
+            // Calculate speeds (bytes per second)
+            $now = time();
+            $timeDiff = $now - $prevSyncAt;
+            $currentSpeed = 0;
+            $speedUp = 0;
+            $speedDown = 0;
+
+            if ($timeDiff > 0 && $prevSyncAt > 0) {
+                // Total speed
+                $bytesDiff = ($stats['bytes_sent'] + $stats['bytes_received']) - ($prevSent + $prevReceived);
+                if ($bytesDiff > 0) {
+                    $currentSpeed = (int) ($bytesDiff / $timeDiff);
+                }
+
+                // Upload speed
+                $sentDiff = $stats['bytes_sent'] - $prevSent;
+                if ($sentDiff > 0) {
+                    $speedUp = (int) ($sentDiff / $timeDiff);
+                }
+
+                // Download speed
+                $receivedDiff = $stats['bytes_received'] - $prevReceived;
+                if ($receivedDiff > 0) {
+                    $speedDown = (int) ($receivedDiff / $timeDiff);
+                }
+            }
+
             $stmt = $pdo->prepare('
                 UPDATE vpn_clients 
-                SET bytes_sent = ?, bytes_received = ?, last_handshake = ?, last_sync_at = NOW()
+                SET bytes_sent = ?, bytes_received = ?, last_handshake = ?, current_speed = ?, speed_up = ?, speed_down = ?, last_sync_at = NOW()
                 WHERE id = ?
             ');
 
@@ -1570,6 +1615,9 @@ class VpnClient
                 $stats['bytes_sent'],
                 $stats['bytes_received'],
                 $lastHandshake,
+                $currentSpeed,
+                $speedUp,
+                $speedDown,
                 $this->clientId
             ]);
         } catch (Exception $e) {

@@ -1210,7 +1210,30 @@ class InstallProtocolManager
         }
 
         // 2. Modify config
+
+        // Ensure policy for 1 user 1 connection
+        if (!isset($config['policy'])) {
+            $config['policy'] = ['levels' => ['0' => []]];
+        }
+        if (!isset($config['policy']['levels'])) {
+            $config['policy']['levels'] = ['0' => []];
+        }
+        if (!isset($config['policy']['levels']['0'])) {
+            $config['policy']['levels']['0'] = [];
+        }
+
+        // Enforce limitIp: 1 for user level 0
+        $config['policy']['levels']['0']['handshake'] = 4;
+        $config['policy']['levels']['0']['connIdle'] = 300;
+        $config['policy']['levels']['0']['uplinkOnly'] = 2;
+        $config['policy']['levels']['0']['downlinkOnly'] = 5;
+        $config['policy']['levels']['0']['statsUserUplink'] = true;
+        $config['policy']['levels']['0']['statsUserDownlink'] = true;
+        $config['policy']['levels']['0']['bufferSize'] = 4;
+        $config['policy']['levels']['0']['limitIp'] = 1; // Enforce 1 IP per user
+
         // Assuming VLESS structure: inbounds[0] -> settings -> clients
+
         if (!isset($config['inbounds'][0]['settings']['clients'])) {
             // Might be different structure? But we stick to standard Amnezia XRay config
             if (!isset($config['inbounds'][0]['settings'])) {

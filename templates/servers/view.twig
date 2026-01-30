@@ -335,7 +335,10 @@
             {% endif %}
           </td>
           <td class="px-6 py-4 text-sm">
-            <div id="client-speed-{{ client.id }}" class="text-gray-400">-</div>
+            <div id="client-speed-{{ client.id }}" class="text-gray-600 text-xs">
+              <span class="text-green-600">↑ {{ (client.speed_up|default(0) / 1024)|number_format(1) }} KB/s</span><br>
+              <span class="text-blue-600">↓ {{ (client.speed_down|default(0) / 1024)|number_format(1) }} KB/s</span>
+            </div>
           </td>
           <td class="px-6 py-4 text-sm">
             {% if client.last_handshake %}
