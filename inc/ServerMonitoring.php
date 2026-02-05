@@ -27,19 +27,11 @@ class ServerMonitoring
             return true;
         }
 
-        $containerName = $this->serverData['container_name'];
-        if (strpos($containerName, 'xray') === false) {
-            $this->xrayStatsFetched = true;
-            return true;
-        }
-
-        // Use --reset=true to get delta since last check and prevent counter reset on restart
-        $xrayContainer = $this->getXrayContainerName();
-        if (!$xrayContainer) {
-            $this->xrayStatsFetched = true;
-            return true; // Not an Xray server
-        }
-        $cmd = "docker exec $xrayContainer xray api statsquery --pattern 'user>>>' --reset=true --server=127.0.0.1:10085";
+        // Always try to fetch from amnezia-xray container
+        // Even if server's container_name is different, there may be xray clients
+        $xrayContainer = $this->getXrayContainerName() ?? 'amnezia-xray';
+        
+        $cmd = "docker exec $xrayContainer xray api statsquery --pattern 'user>>>' --reset=true --server=127.0.0.1:10085 2>/dev/null";
         $json = $this->execSSH($cmd);
 
         if (!$json || trim($json) === '') {
@@ -274,24 +266,40 @@ class ServerMonitoring
         $containerName = $this->serverData['container_name'];
         $bytesReceived = 0;
         $bytesSent = 0;
+        $speedUp = 0;
+        $speedDown = 0;
 
-        $protocol = $this->serverData['install_protocol'] ?? '';
+        // Determine if this client is XRay based on protocol_id
+        $isXrayClient = false;
+        if (!empty($client['protocol_id'])) {
+            $stmtProto = $db->prepare('SELECT slug FROM protocols WHERE id = ?');
+            $stmtProto->execute([$client['protocol_id']]);
+            $protoData = $stmtProto->fetch();
+            if ($protoData && stripos($protoData['slug'], 'xray') !== false) {
+                $isXrayClient = true;
+            }
+        }
+        
+        // Fallback: check config for vless URI
+        if (!$isXrayClient && !empty($client['config']) && strpos($client['config'], 'vless://') !== false) {
+            $isXrayClient = true;
+        }
 
-        if (strpos($protocol, 'xray') !== false || strpos($protocol, 'vless') !== false) {
+        if ($isXrayClient) {
             // Retrieve DELTA from cache
             if ($this->xrayStatsFetched) {
-                // Try to find by UUID first (if we tracked it) or Email/Name
-                // Our cache is keyed by "email" from the stats query "user>>>email>>>..."
-                // In VpnClient.php, the X-ray config uses client 'id' (uuid) as 'id' and 'email' as 'email'.
-                // Usually Amnezia sets email = uuid or name.
-                // Let's try keys: client['id'], client['name'], client['email'] (if exists)
-
-                // In our previous fetchXrayStats, we keyed by $parts[1].
-
-                $key = $client['id']; // UUID
+                // Try name first (matches email in xray config), then UUID from config
+                $key = $client['name'];
                 if (!isset($this->xrayStatsCache[$key])) {
-                    // Try name
-                    $key = $client['name'];
+                    // Try UUID from config
+                    if (!empty($client['config']) && preg_match('/vless:\/\/([0-9a-fA-F-]{36})@/i', $client['config'], $m)) {
+                        $key = $m[1];
+                    }
+                }
+                
+                if (!isset($this->xrayStatsCache[$key])) {
+                    // Try client['id'] as last resort
+                    $key = $client['id'];
                 }
 
                 if (isset($this->xrayStatsCache[$key])) {
@@ -307,32 +315,42 @@ class ServerMonitoring
                     $bytesReceived = ($currentDbStats['bytes_received'] ?? 0) + (int) $xStats['down'];
 
                     // Calculate speed based on DELTA (since Reset=true, value IS the delta since last check)
-                    // If we check every 60s, speed = delta / 60.
-                    // But exact interval varies.
-                    // For now, let's trust the delta.
-
-                    // Simple speed aproximation: Delta / (Now - LastCheck)
-                    // But we don't have exact LastCheck time per client easily here.
-                    // However, sparklines use a separate API.
-                    // The 'speed_up'/'speed_down' columns in DB are usually "Current Speed".
-                    // If we just gathered a delta over X seconds...
-                    // Let's approximate: X-ray stats delta.
-                    // We can just store the 'current speed' as calculated by (Delta Bytes / Interval).
-                    // But we don't know the exact interval since the LAST fetch was run by the cron.
-                    // Assuming cron runs every minute?
-                    // If we assume 1 minute (60s):
+                    // Assuming cron runs every minute (60s):
                     $speedUp = round($xStats['up'] / 60);
                     $speedDown = round($xStats['down'] / 60);
+                } else {
+                    // No stats in cache, use current DB values
+                    $stmt = $db->prepare("SELECT bytes_sent, bytes_received FROM vpn_clients WHERE id = ?");
+                    $stmt->execute([$client['id']]);
+                    $currentDbStats = $stmt->fetch(PDO::FETCH_ASSOC);
+                    $bytesSent = $currentDbStats['bytes_sent'] ?? 0;
+                    $bytesReceived = $currentDbStats['bytes_received'] ?? 0;
                 }
             }
         } else {
-            // WireGuard Logic
+            // WireGuard Logic - get bytes and handshake timestamp
             $publicKey = $client['public_key'];
-            $cmd = "docker exec {$containerName} wg show all dump | grep '{$publicKey}' | awk '{print \$6, \$7}'";
+            // wg show all dump format (tab-separated):
+            // $1=interface $2=pubkey $3=psk $4=endpoint $5=allowed-ips $6=latest-handshake $7=rx-bytes $8=tx-bytes $9=keepalive
+            // rx-bytes = bytes received by server = client's upload (bytes_sent)
+            // tx-bytes = bytes transmitted by server = client's download (bytes_received)
+            $cmd = "docker exec {$containerName} wg show all dump | grep '{$publicKey}' | awk '{print \$6, \$7, \$8}'";
             $result = $this->execSSH($cmd);
 
             if ($result) {
-                list($bytesReceived, $bytesSent) = explode(' ', trim($result));
+                $parts = explode(' ', trim($result));
+                if (count($parts) >= 3) {
+                    $handshakeTs = (int)$parts[0];
+                    $bytesSent = (int)$parts[1];     // server's rx = client's upload
+                    $bytesReceived = (int)$parts[2]; // server's tx = client's download
+                    
+                    // Update last_handshake if there was a recent handshake
+                    if ($handshakeTs > 0) {
+                        $handshakeDate = date('Y-m-d H:i:s', $handshakeTs);
+                        $stmtHs = $db->prepare("UPDATE vpn_clients SET last_handshake = ? WHERE id = ?");
+                        $stmtHs->execute([$handshakeDate, $client['id']]);
+                    }
+                }
             }
         }
 
@@ -425,10 +443,10 @@ class ServerMonitoring
             $stats['speed_down_kbps'],
         ]);
 
-        // Update vpn_clients table with latest stats
+        // Update vpn_clients table with latest stats (don't touch last_handshake - it's set separately for WG/AWG)
         $stmt = $db->prepare("
             UPDATE vpn_clients 
-            SET bytes_sent = ?, bytes_received = ?, speed_up = ?, speed_down = ?, current_speed = ?, last_handshake = NOW(), last_sync_at = NOW()
+            SET bytes_sent = ?, bytes_received = ?, speed_up = ?, speed_down = ?, current_speed = ?, last_sync_at = NOW()
             WHERE id = ?
         ");
 
@@ -785,11 +803,23 @@ class ServerMonitoring
         
         // Get all active servers
         $servers = VpnServer::listAll();
+        $db = DB::conn();
         
         foreach ($servers as $serverData) {
-            // Check if this is an Xray server
+            // Check if this server has any XRay clients
+            $stmt = $db->prepare("
+                SELECT COUNT(*) as cnt FROM vpn_clients vc
+                JOIN protocols p ON vc.protocol_id = p.id
+                WHERE vc.server_id = ? AND p.slug LIKE '%xray%'
+            ");
+            $stmt->execute([$serverData['id']]);
+            $hasXrayClients = (int)$stmt->fetchColumn() > 0;
+            
+            // Also check container_name as fallback
             $containerName = $serverData['container_name'] ?? '';
-            if (strpos($containerName, 'xray') === false) {
+            $isXrayServer = strpos($containerName, 'xray') !== false;
+            
+            if (!$hasXrayClients && !$isXrayServer) {
                 continue;
             }
             
@@ -799,7 +829,7 @@ class ServerMonitoring
             $username = $serverData['username'] ?? 'root';
             $password = $serverData['password'] ?? '';
             
-            $xrayContainer = $containerName ?: 'amnezia-xray';
+            $xrayContainer = $isXrayServer ? $containerName : 'amnezia-xray';
             $cmd = "docker exec $xrayContainer xray api statsgetallonlineusers --server=127.0.0.1:10085";
             
             $sshOptions = '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5';
@@ -861,55 +891,76 @@ class ServerMonitoring
     public static function getOnlineClientsForServer(array $serverData): array
     {
         $result = [];
+        $db = DB::conn();
         
-        // Check if this is an Xray server
+        // 1. Get XRay online clients from Xray API
+        $stmt = $db->prepare("
+            SELECT COUNT(*) as cnt FROM vpn_clients vc
+            JOIN protocols p ON vc.protocol_id = p.id
+            WHERE vc.server_id = ? AND p.slug LIKE '%xray%'
+        ");
+        $stmt->execute([$serverData['id']]);
+        $hasXrayClients = (int)$stmt->fetchColumn() > 0;
+        
         $containerName = $serverData['container_name'] ?? '';
-        if (strpos($containerName, 'xray') === false) {
-            return $result;
-        }
+        $isXrayServer = strpos($containerName, 'xray') !== false;
         
-        // Build SSH command
-        $host = $serverData['host'];
-        $port = (int)($serverData['port'] ?? 22);
-        $username = $serverData['username'] ?? 'root';
-        $password = $serverData['password'] ?? '';
-        
-        $xrayContainer = $containerName ?: 'amnezia-xray';
-        $cmd = "docker exec $xrayContainer xray api statsgetallonlineusers --server=127.0.0.1:10085";
-        
-        $sshOptions = '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5';
-        $sshCmd = sprintf(
-            "sshpass -p '%s' ssh -p %d %s %s@%s %s 2>/dev/null",
-            $password,
-            $port,
-            $sshOptions,
-            $username,
-            $host,
-            escapeshellarg($cmd)
-        );
-        
-        $output = shell_exec($sshCmd);
-        if (!$output) {
-            return $result;
-        }
-        
-        $data = json_decode($output, true);
-        if (!isset($data['users']) || !is_array($data['users'])) {
-            return $result;
-        }
-        
-        foreach ($data['users'] as $user) {
-            // Parse format: "user>>>email>>>online"
-            if (is_string($user)) {
-                $parts = explode('>>>', $user);
-                if (count($parts) >= 2) {
-                    $result[] = $parts[1];
+        if ($hasXrayClients || $isXrayServer) {
+            $host = $serverData['host'];
+            $port = (int)($serverData['port'] ?? 22);
+            $username = $serverData['username'] ?? 'root';
+            $password = $serverData['password'] ?? '';
+            
+            $xrayContainer = $isXrayServer ? $containerName : 'amnezia-xray';
+            $cmd = "docker exec $xrayContainer xray api statsgetallonlineusers --server=127.0.0.1:10085";
+            
+            $sshOptions = '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5';
+            $sshCmd = sprintf(
+                "sshpass -p '%s' ssh -p %d %s %s@%s %s 2>/dev/null",
+                $password,
+                $port,
+                $sshOptions,
+                $username,
+                $host,
+                escapeshellarg($cmd)
+            );
+            
+            $output = shell_exec($sshCmd);
+            if ($output) {
+                $data = json_decode($output, true);
+                if (isset($data['users']) && is_array($data['users'])) {
+                    foreach ($data['users'] as $user) {
+                        if (is_string($user)) {
+                            $parts = explode('>>>', $user);
+                            if (count($parts) >= 2) {
+                                $result[] = $parts[1];
+                            }
+                        } else {
+                            $email = $user['email'] ?? null;
+                            if ($email) {
+                                $result[] = $email;
+                            }
+                        }
+                    }
                 }
-            } else {
-                $email = $user['email'] ?? null;
-                if ($email) {
-                    $result[] = $email;
-                }
+            }
+        }
+        
+        // 2. Add WireGuard/AWG clients with recent handshake (< 5 minutes)
+        // Exclude XRay clients - they use Xray API for online status
+        $stmt = $db->prepare("
+            SELECT vc.name FROM vpn_clients vc
+            LEFT JOIN protocols p ON vc.protocol_id = p.id
+            WHERE vc.server_id = ? 
+              AND vc.status = 'active'
+              AND vc.last_handshake IS NOT NULL 
+              AND vc.last_handshake >= DATE_SUB(NOW(), INTERVAL 300 SECOND)
+              AND (p.slug IS NULL OR p.slug NOT LIKE '%xray%')
+        ");
+        $stmt->execute([$serverData['id']]);
+        while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+            if (!in_array($row['name'], $result)) {
+                $result[] = $row['name'];
             }
         }
         

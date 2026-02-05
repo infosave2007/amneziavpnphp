@@ -267,11 +267,24 @@ Router::get('/dashboard', function () {
 
     // Get real-time online clients count from Xray API
     $onlineData = ServerMonitoring::countOnlineClients();
+    
+    // Also count clients with recent handshake (within 5 minutes) for WireGuard/AWG
+    $pdo = DB::conn();
+    $stmt = $pdo->query("
+        SELECT COUNT(*) as cnt FROM vpn_clients 
+        WHERE last_handshake IS NOT NULL 
+        AND last_handshake > DATE_SUB(NOW(), INTERVAL 5 MINUTE)
+        AND status = 'active'
+    ");
+    $recentHandshakeCount = (int)$stmt->fetchColumn();
+    
+    // Combine both counts (XRay online + recent handshake), avoiding duplicates
+    $totalOnline = max($onlineData['total'], $recentHandshakeCount);
 
     View::render('dashboard.twig', [
         'servers' => $servers,
         'clients' => $clients,
-        'online_count' => $onlineData['total'],
+        'online_count' => $totalOnline,
         'online_users' => $onlineData['users'],
     ]);
 });

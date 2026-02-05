@@ -1551,21 +1551,58 @@ class VpnClient
             // XRay stats logic
             $stats = [];
 
-            // Heuristic: if container name contains 'xray' or protocol slug suggests xray
-            $containerName = $serverData['container_name'] ?? '';
-            // Or better: try to detect protocol from config if container name is vague (but usually amnezia-xray)
+            // Determine protocol by client's protocol_id
+            $isXray = false;
+            $xrayContainerName = 'amnezia-xray'; // Default XRay container name
+            
+            if (!empty($this->data['protocol_id'])) {
+                $stmtProto = $pdo->prepare('SELECT slug FROM protocols WHERE id = ?');
+                $stmtProto->execute([$this->data['protocol_id']]);
+                $protoData = $stmtProto->fetch();
+                if ($protoData && stripos($protoData['slug'], 'xray') !== false) {
+                    $isXray = true;
+                }
+            }
+            
+            // Fallback: check container_name or config for xray indicators
+            if (!$isXray) {
+                $containerName = $serverData['container_name'] ?? '';
+                if (strpos($containerName, 'xray') !== false) {
+                    $isXray = true;
+                    $xrayContainerName = $containerName;
+                } elseif (!empty($this->data['config']) && strpos($this->data['config'], 'vless://') !== false) {
+                    $isXray = true;
+                }
+            }
 
-            if (strpos($containerName, 'xray') !== false) {
-                // Extract UUID from config for XRay (vless://UUID@...)
+            if ($isXray) {
+                // XRay stats are tracked by email field in xray config
+                // Try client name first (typically used as email), then UUID from config as fallback
                 $identifier = null;
+                $uuid = null;
+                
+                // Extract UUID from config 
                 if (!empty($this->data['config']) && preg_match('/vless:\/\/([0-9a-fA-F-]{36})@/i', $this->data['config'], $m)) {
-                    $identifier = $m[1];
-                } elseif (!empty($this->data['name'])) {
+                    $uuid = $m[1];
+                }
+                
+                // Override container_name for XRay stats
+                $xrayServerData = $serverData;
+                $xrayServerData['container_name'] = $xrayContainerName;
+                
+                // Try name first (typically matches email in xray config)
+                if (!empty($this->data['name'])) {
                     $identifier = $this->data['name'];
+                    $stats = self::getXrayStats($xrayServerData, $identifier);
+                }
+                
+                // If no stats found by name, try UUID
+                if ((empty($stats) || ($stats['bytes_sent'] == 0 && $stats['bytes_received'] == 0)) && $uuid) {
+                    $identifier = $uuid;
+                    $stats = self::getXrayStats($xrayServerData, $identifier);
                 }
 
-                if ($identifier) {
-                    $stats = self::getXrayStats($serverData, $identifier);
+                if ($identifier && !empty($stats)) {
                     // Infer online status for XRay: if traffic increased, they are online.
                     // Update last_handshake to NOW() if activity detected.
                     if ($stats['bytes_sent'] > $prevSent || $stats['bytes_received'] > $prevReceived) {

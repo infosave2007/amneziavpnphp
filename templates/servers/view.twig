@@ -276,8 +276,9 @@
             {% endif %}
           </td>
           <td class="px-6 py-4">{{ client.client_ip }}</td>
-          <td class="px-6 py-4" data-client-name="{{ client.name }}" data-client-status="{{ client.status }}">
-            {% if client.name in online_logins %}
+          <td class="px-6 py-4" data-client-name="{{ client.name }}" data-client-status="{{ client.status }}" data-last-handshake="{{ client.last_handshake }}">
+            {% set is_online_by_handshake = client.last_handshake and (("now"|date('U') - client.last_handshake|date('U')) < 300) %}
+            {% if client.name in online_logins or is_online_by_handshake %}
               <span class="online-badge px-2 py-1 bg-green-100 text-green-800 rounded text-xs"><i class="fas fa-wifi mr-1"></i>Online</span>
             {% elseif client.status == 'active' %}
               <span class="status-badge px-2 py-1 bg-gray-100 text-gray-600 rounded text-xs">{{ t('status.active') }}</span>
