@@ -414,24 +414,14 @@ class VpnClient {
      */
     private static function removeClientFromServer(array $serverData, string $publicKey): void {
         $containerName = $serverData['container_name'];
-        
-        // First, remove using wg command (live removal)
-        $removeCmd = sprintf(
-            "docker exec -i %s wg set wg0 peer %s remove",
-            $containerName,
-            escapeshellarg($publicKey)
-        );
-        
-        self::executeServerCommand($serverData, $removeCmd, true);
-        
-        // Then remove from wg0.conf file to make it persistent
-        // Use a more reliable method: read, filter, write
+
+        // Read current config
         $readCmd = sprintf("docker exec -i %s cat /opt/amnezia/awg/wg0.conf", $containerName);
         $config = self::executeServerCommand($serverData, $readCmd, true);
-        
-        // Parse and remove the peer section
+
+        // Remove the peer section
         $newConfig = self::removePeerFromConfig($config, $publicKey);
-        
+
         // Write back to file
         $escapedConfig = str_replace("'", "'\\''", $newConfig);
         $writeCmd = sprintf(
@@ -439,13 +429,15 @@ class VpnClient {
             $containerName,
             $escapedConfig
         );
-        
         self::executeServerCommand($serverData, $writeCmd, true);
-        
-        // Save config
-        $saveCmd = sprintf("docker exec -i %s wg-quick save wg0", $containerName);
-        self::executeServerCommand($serverData, $saveCmd, true);
-        
+
+        // Apply changes to running interface (POSIX sh compatible)
+        $syncCmd = sprintf(
+            "docker exec -i %s sh -lc 'wg-quick strip /opt/amnezia/awg/wg0.conf > /tmp/wg0.strip && wg syncconf wg0 /tmp/wg0.strip && rm -f /tmp/wg0.strip'",
+            $containerName
+        );
+        self::executeServerCommand($serverData, $syncCmd, true);
+
         // Remove from clientsTable
         self::removeFromClientsTable($serverData, $publicKey);
     }
