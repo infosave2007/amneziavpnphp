@@ -1271,6 +1271,39 @@ Router::get('/api/clients/{id}/qr', function ($params) {
     }
 });
 
+// API: Delete client (permanent)
+Router::delete('/api/clients/{id}/delete', function ($params) {
+    header('Content-Type: application/json');
+
+    $user = JWT::requireAuth();
+    if (!$user) return;
+
+    $clientId = (int)$params['id'];
+
+    try {
+        $client = new VpnClient($clientId);
+        $clientData = $client->getData();
+
+        // Check ownership
+        if ($clientData['user_id'] != $user['id']) {
+            http_response_code(403);
+            echo json_encode(['error' => 'Forbidden']);
+            return;
+        }
+
+        // Perform deletion
+        if ($client->delete()) {
+            echo json_encode(['success' => true, 'message' => 'Client deleted successfully']);
+        } else {
+            http_response_code(500);
+            echo json_encode(['error' => 'Failed to delete client']);
+        }
+    } catch (Exception $e) {
+        http_response_code(500);
+        echo json_encode(['error' => $e->getMessage()]);
+    }
+});
+
 // API: Revoke client
 Router::post('/api/clients/{id}/revoke', function ($params) {
     header('Content-Type: application/json');
