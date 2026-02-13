@@ -622,7 +622,7 @@ class VpnClient
     /**
      * Get next available client IP
      */
-    private static function getNextClientIP(array $serverData): string
+    public static function getNextClientIP(array $serverData): string
     {
         $pdo = DB::conn();
 

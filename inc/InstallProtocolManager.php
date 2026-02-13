@@ -1749,6 +1749,14 @@ class InstallProtocolManager
 
                 $name = $nameById[$uuid] ?? ($email !== '' ? $email : 'xray-' . substr($uuid, 0, 8));
 
+                // Allocate a proper IP address for the client instead of using UUID
+                try {
+                    $clientIp = VpnClient::getNextClientIP($serverData);
+                } catch (Throwable $e) {
+                    // Fallback to UUID if IP allocation fails
+                    $clientIp = $uuid;
+                }
+
                 // Generate VLESS config URL for the client
                 $host = $serverData['host'] ?? '';
                 $realityPub = $details['reality_public_key'] ?? '';
@@ -1773,7 +1781,7 @@ class InstallProtocolManager
                     $serverId,
                     $serverData['user_id'] ?? null,
                     $name,
-                    $uuid,        // Use UUID as client_ip (unique key requires non-empty value)
+                    $clientIp,        // Use allocated IP address
                     $uuid,        // Store UUID as public_key for X-Ray clients
                     '',
                     '',
