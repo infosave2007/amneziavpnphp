@@ -467,6 +467,7 @@ class InstallProtocolManager
             }
         }
         $restored = 0;
+        $pid = self::resolveProtocolId($protocol);
         if (trim($wgConfig) !== '') {
             $pattern = '/\[Peer\][^\[]*?PublicKey\s*=\s*(.+?)\s*[\r\n]+[\s\S]*?AllowedIPs\s*=\s*(.+?)(?:\r?\n|$)/';
             if (preg_match_all($pattern, $wgConfig, $matches, PREG_SET_ORDER)) {
@@ -491,7 +492,7 @@ class InstallProtocolManager
                         continue;
                     }
                     $name = $nameByPub[$pub] ?? ('import-' . str_replace('.', '_', $clientIp));
-                    $ins = $pdo->prepare('INSERT INTO vpn_clients (server_id, user_id, name, client_ip, public_key, private_key, preshared_key, config, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())');
+                    $ins = $pdo->prepare('INSERT INTO vpn_clients (server_id, user_id, name, client_ip, public_key, private_key, preshared_key, config, protocol_id, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())');
                     $ins->execute([
                         $server->getId(),
                         $serverData['user_id'] ?? null,
@@ -501,6 +502,7 @@ class InstallProtocolManager
                         '',
                         $details['preshared_key'] ?? null,
                         '',
+                        $pid ?: null,
                         'active'  // Import as active since they already work on the server
                     ]);
                     $restored++;
