@@ -238,6 +238,18 @@ class InstallProtocolManager
             return self::detectBuiltinAwg($server, $protocol);
         }
 
+        $slug = $protocol['slug'] ?? '';
+
+        // For AWG shell-based scenarios (amnezia-wg, amnezia-wg-advanced), use builtin AWG detection
+        if (self::isAwgProtocol($slug, $protocol)) {
+            return self::detectBuiltinAwg($server, $protocol);
+        }
+
+        // For X-Ray VLESS, use builtin detection
+        if ($slug === 'xray-vless') {
+            return self::detectBuiltinXray($server, $protocol);
+        }
+
         return self::runScript($server, $protocol, 'detect', $options);
     }
 
@@ -306,6 +318,18 @@ class InstallProtocolManager
         $engine = self::getEngine($protocol);
         if ($engine === 'builtin_awg') {
             return self::restoreBuiltinAwg($server, $protocol, $detection, $options);
+        }
+
+        $slug = $protocol['slug'] ?? '';
+
+        // For AWG shell-based scenarios, use builtin AWG restore
+        if (self::isAwgProtocol($slug, $protocol)) {
+            return self::restoreBuiltinAwg($server, $protocol, $detection, $options);
+        }
+
+        // For X-Ray VLESS, use builtin restore
+        if ($slug === 'xray-vless') {
+            return self::restoreBuiltinXray($server, $protocol, $detection, $options);
         }
 
         $result = self::runScript($server, $protocol, 'restore', array_merge($options, [
@@ -477,7 +501,7 @@ class InstallProtocolManager
                         '',
                         $details['preshared_key'] ?? null,
                         '',
-                        'disabled'
+                        'active'  // Import as active since they already work on the server
                     ]);
                     $restored++;
                 }
@@ -867,6 +891,22 @@ class InstallProtocolManager
         return $definition['engine'] ?? 'builtin_awg';
     }
 
+    /**
+     * Check if a protocol is an AWG variant (by slug or install_script content)
+     * Used to route shell-based AWG scenarios to builtin AWG detection/restore
+     */
+    private static function isAwgProtocol(string $slug, array $protocol): bool
+    {
+        if (in_array($slug, ['amnezia-wg', 'amnezia-wg-advanced'], true)) {
+            return true;
+        }
+        $installScript = (string) ($protocol['install_script'] ?? '');
+        if ($installScript !== '' && preg_match('/amneziavpn\/amnezia-wg|amnezia\/awg|amnezia-awg/i', $installScript)) {
+            return true;
+        }
+        return false;
+    }
+
     private static function fallbackProtocols(): array
     {
         return [
@@ -940,6 +980,18 @@ class InstallProtocolManager
             return self::detectBuiltinAwg($server, $protocol);
         }
 
+        $slug = $protocol['slug'] ?? '';
+
+        // For AWG shell-based scenarios (amnezia-wg, amnezia-wg-advanced), use builtin AWG detection
+        if (self::isAwgProtocol($slug, $protocol)) {
+            return self::detectBuiltinAwg($server, $protocol);
+        }
+
+        // For X-Ray VLESS, use builtin detection
+        if ($slug === 'xray-vless') {
+            return self::detectBuiltinXray($server, $protocol);
+        }
+
         return self::runScript($server, $protocol, 'detect', $options);
     }
 
@@ -956,9 +1008,7 @@ class InstallProtocolManager
 
         // For script-driven protocols, try to detect AWG scenario and fallback to builtin uninstall
         $slug = $protocol['slug'] ?? '';
-        $installScript = (string) ($protocol['install_script'] ?? '');
-        $looksLikeAwg = (bool) preg_match('/amneziavpn\/amnezia-wg|amnezia\/awg|amnezia-awg/i', $installScript);
-        if (in_array($slug, ['amnezia-wg-advanced', 'amnezia-wg'], true) || $looksLikeAwg) {
+        if (self::isAwgProtocol($slug, $protocol)) {
             // Prefer builtin AWG uninstall by default because script variants may have CRLF issues
             // or leave behind the canonical container name, causing install conflicts.
             if (!empty($options['use_script_uninstall'])) {
@@ -1027,16 +1077,56 @@ class InstallProtocolManager
         $serverId = $server->getId();
         try {
             Logger::appendInstall($serverId, 'Activate start for ' . ($protocol['slug'] ?? 'unknown') . ' engine ' . $engine);
+
+            // ── Check for existing installation before doing anything destructive ──
+            $slug = $protocol['slug'] ?? '';
+            $isAwg = $engine === 'builtin_awg' || self::isAwgProtocol($slug, $protocol);
+            $isXray = $slug === 'xray-vless';
+
+            if ($isAwg) {
+                $detection = self::detectBuiltinAwg($server, $protocol);
+                if (in_array($detection['status'] ?? '', ['existing', 'partial'], true)) {
+                    Logger::appendInstall($serverId, 'Existing AWG installation detected, restoring instead of reinstalling');
+                    $restoreResult = self::restoreBuiltinAwg($server, $protocol, $detection, $options);
+                    // Import existing clients into DB
+                    self::importExistingAwgClients($server, $protocol, $detection);
+                    $pdo = DB::conn();
+                    $pid = self::resolveProtocolId($protocol);
+                    if ($pid) {
+                        $details = $detection['details'] ?? [];
+                        $config = [
+                            'server_host' => $server->getData()['host'] ?? null,
+                            'server_port' => $details['vpn_port'] ?? null,
+                            'extras' => [
+                                'vpn_port' => $details['vpn_port'] ?? null,
+                                'server_public_key' => $details['server_public_key'] ?? null,
+                                'preshared_key' => $details['preshared_key'] ?? null,
+                                'awg_params' => $details['awg_params'] ?? null,
+                            ]
+                        ];
+                        $stmt2 = $pdo->prepare('INSERT INTO server_protocols (server_id, protocol_id, config_data, applied_at, created_at) VALUES (?, ?, ?, NOW(), NOW()) ON DUPLICATE KEY UPDATE config_data = VALUES(config_data), applied_at = NOW()');
+                        $stmt2->execute([$serverId, $pid, json_encode($config)]);
+                    }
+                    return array_merge($restoreResult, ['mode' => 'restore_existing']);
+                }
+            }
+
+            if ($isXray) {
+                $xrayDetection = self::detectBuiltinXray($server, $protocol);
+                if (in_array($xrayDetection['status'] ?? '', ['existing', 'partial'], true)) {
+                    Logger::appendInstall($serverId, 'Existing X-Ray installation detected, restoring instead of reinstalling');
+                    $restoreResult = self::restoreBuiltinXray($server, $protocol, $xrayDetection, $options);
+                    return array_merge($restoreResult, ['mode' => 'restore_existing']);
+                }
+            }
+
+            // ── No existing installation found — proceed with fresh install ──
+
             if ($engine === 'builtin_awg') {
                 $res = $server->runAwgInstall($options);
                 Logger::appendInstall($serverId, 'Builtin AWG install finished');
                 $pdo = DB::conn();
-                $pid = (int) ($protocol['id'] ?? 0);
-                if (!$pid) {
-                    $stmt = $pdo->prepare('SELECT id FROM protocols WHERE slug = ? LIMIT 1');
-                    $stmt->execute([$protocol['slug'] ?? self::DEFAULT_SLUG]);
-                    $pid = (int) $stmt->fetchColumn();
-                }
+                $pid = self::resolveProtocolId($protocol);
                 if ($pid) {
                     $config = [
                         'server_host' => $server->getData()['host'] ?? null,
@@ -1145,12 +1235,7 @@ class InstallProtocolManager
             }
             Logger::appendInstall($serverId, 'Scripted install parsed port ' . ($port ?? 0) . ' password ' . ($password ?? ''));
             $pdo = DB::conn();
-            $pid = (int) ($protocol['id'] ?? 0);
-            if (!$pid) {
-                $stmt = $pdo->prepare('SELECT id FROM protocols WHERE slug = ? LIMIT 1');
-                $stmt->execute([$protocol['slug'] ?? '']);
-                $pid = (int) $stmt->fetchColumn();
-            }
+            $pid = self::resolveProtocolId($protocol);
             if ($pid) {
                 $config = [
                     'server_host' => $server->getData()['host'] ?? null,
@@ -1438,5 +1523,353 @@ class InstallProtocolManager
             $server->executeCommand("docker exec -i $containerName wg-quick down wg0 || true", true);
             $server->executeCommand("docker exec -i $containerName wg-quick up wg0", true);
         }
+    }
+
+    /**
+     * Resolve protocol ID from protocol array, looking up by slug if needed
+     */
+    private static function resolveProtocolId(array $protocol): int
+    {
+        $pid = (int) ($protocol['id'] ?? 0);
+        if (!$pid) {
+            $slug = $protocol['slug'] ?? '';
+            if ($slug === '') {
+                return 0;
+            }
+            try {
+                $pdo = DB::conn();
+                $stmt = $pdo->prepare('SELECT id FROM protocols WHERE slug = ? LIMIT 1');
+                $stmt->execute([$slug]);
+                $pid = (int) $stmt->fetchColumn();
+            } catch (Throwable $e) {
+                return 0;
+            }
+        }
+        return $pid;
+    }
+
+    /**
+     * Detect existing X-Ray (VLESS Reality) installation on the server
+     */
+    private static function detectBuiltinXray(VpnServer $server, array $protocol): array
+    {
+        $metadata = $protocol['definition']['metadata'] ?? [];
+        $containerName = $metadata['container_name'] ?? 'amnezia-xray';
+        $containerFilter = escapeshellarg('^' . $containerName . '$');
+        $containerArg = escapeshellarg($containerName);
+
+        $containerList = trim($server->executeCommand("docker ps -a --filter name={$containerFilter} --format '{{.Names}}'", true));
+        if ($containerList === '') {
+            return [
+                'status' => 'absent',
+                'message' => 'Контейнер X-Ray не найден на сервере'
+            ];
+        }
+
+        $containerState = trim($server->executeCommand("docker inspect --format '{{.State.Status}}' {$containerArg}", true));
+
+        // Read X-Ray config
+        $configRaw = $server->executeCommand("docker exec -i {$containerArg} cat /opt/amnezia/xray/server.json 2>/dev/null", true);
+        if (trim($configRaw) === '') {
+            $configRaw = $server->executeCommand("docker exec -i {$containerArg} cat /etc/xray/config.json 2>/dev/null", true);
+        }
+
+        if (trim($configRaw) === '') {
+            return [
+                'status' => 'partial',
+                'message' => 'Контейнер X-Ray найден, но конфигурация server.json отсутствует',
+                'details' => [
+                    'container_name' => $containerName,
+                    'container_status' => $containerState,
+                ]
+            ];
+        }
+
+        $config = json_decode(trim($configRaw), true);
+        if (!is_array($config)) {
+            return [
+                'status' => 'partial',
+                'message' => 'Не удалось разобрать JSON конфигурации X-Ray',
+                'details' => [
+                    'container_name' => $containerName,
+                    'container_status' => $containerState,
+                ]
+            ];
+        }
+
+        // Extract port, clients, Reality keys
+        $inbounds = $config['inbounds'] ?? [];
+        $port = 443;
+        $xrayClients = [];
+        $realityPublicKey = null;
+        $realityPrivateKey = null;
+        $realityShortId = null;
+        $realityServerName = null;
+
+        if (is_array($inbounds) && !empty($inbounds)) {
+            $port = (int) ($inbounds[0]['port'] ?? 443);
+            $settings = $inbounds[0]['settings'] ?? [];
+            $xrayClients = $settings['clients'] ?? [];
+
+            $stream = $inbounds[0]['streamSettings'] ?? [];
+            if (is_array($stream) && ($stream['security'] ?? '') === 'reality') {
+                $rs = $stream['realitySettings'] ?? [];
+                $serverNames = $rs['serverNames'] ?? ($rs['serverName'] ?? []);
+                $shortIds = $rs['shortIds'] ?? ($rs['shortId'] ?? []);
+                $realityServerName = is_array($serverNames) ? ($serverNames[0] ?? null) : (is_string($serverNames) ? $serverNames : null);
+                $realityShortId = is_array($shortIds) ? ($shortIds[0] ?? null) : (is_string($shortIds) ? $shortIds : null);
+                $realityPrivateKey = $rs['privateKey'] ?? null;
+
+                // Derive public key from private
+                if (is_string($realityPrivateKey) && $realityPrivateKey !== '' && function_exists('sodium_crypto_scalarmult_base')) {
+                    $b64 = strtr($realityPrivateKey, '-_', '+/');
+                    $bin = base64_decode($b64, true);
+                    if ($bin === false) {
+                        $bin = base64_decode($realityPrivateKey, true);
+                    }
+                    if (is_string($bin) && strlen($bin) === 32) {
+                        $pub = sodium_crypto_scalarmult_base($bin);
+                        $realityPublicKey = rtrim(strtr(base64_encode($pub), '+/', '-_'), '=');
+                    }
+                }
+            }
+        }
+
+        // Read clientsTable for names
+        $clientsTableRaw = $server->executeCommand("docker exec -i {$containerArg} cat /opt/amnezia/xray/clientsTable 2>/dev/null", true);
+        $clientsTable = json_decode(trim($clientsTableRaw), true);
+        $clientsCount = is_array($xrayClients) ? count($xrayClients) : 0;
+
+        return [
+            'status' => 'existing',
+            'message' => 'Найдена установленная конфигурация X-Ray VLESS Reality',
+            'details' => [
+                'container_name' => $containerName,
+                'container_status' => $containerState,
+                'port' => $port,
+                'clients' => $xrayClients,
+                'clients_table' => is_array($clientsTable) ? $clientsTable : [],
+                'clients_count' => $clientsCount,
+                'reality_public_key' => $realityPublicKey,
+                'reality_private_key' => $realityPrivateKey,
+                'reality_short_id' => $realityShortId,
+                'reality_server_name' => $realityServerName,
+                'config' => $config,
+                'summary' => sprintf('Container %s (%s), port %d, clients %d', $containerName, $containerState ?: 'unknown', $port, $clientsCount)
+            ]
+        ];
+    }
+
+    /**
+     * Restore existing X-Ray installation: save config to DB, import clients
+     */
+    private static function restoreBuiltinXray(VpnServer $server, array $protocol, array $detection, array $options): array
+    {
+        $details = $detection['details'] ?? [];
+        $containerName = $details['container_name'] ?? 'amnezia-xray';
+        $containerArg = escapeshellarg($containerName);
+        $serverId = $server->getId();
+
+        // Ensure container is running
+        $server->executeCommand("docker start {$containerArg} 2>/dev/null || true", true);
+
+        // Update vpn_servers with X-Ray data
+        $port = $details['port'] ?? 443;
+        $pdo = DB::conn();
+        $stmt = $pdo->prepare('
+            UPDATE vpn_servers
+            SET vpn_port = ?,
+                status = ?,
+                error_message = NULL,
+                deployed_at = COALESCE(deployed_at, NOW())
+            WHERE id = ?
+        ');
+        $stmt->execute([$port, 'active', $serverId]);
+        $server->refresh();
+
+        // Save protocol binding
+        $pid = self::resolveProtocolId($protocol);
+        if ($pid) {
+            $config = [
+                'server_host' => $server->getData()['host'] ?? null,
+                'server_port' => $port,
+                'extras' => [
+                    'reality_public_key' => $details['reality_public_key'] ?? null,
+                    'reality_private_key' => $details['reality_private_key'] ?? null,
+                    'reality_short_id' => $details['reality_short_id'] ?? null,
+                    'reality_server_name' => $details['reality_server_name'] ?? null,
+                    'container_name' => $containerName,
+                ]
+            ];
+            $stmt2 = $pdo->prepare('INSERT INTO server_protocols (server_id, protocol_id, config_data, applied_at, created_at) VALUES (?, ?, ?, NOW(), NOW()) ON DUPLICATE KEY UPDATE config_data = VALUES(config_data), applied_at = NOW()');
+            $stmt2->execute([$serverId, $pid, json_encode($config)]);
+        }
+
+        // Import X-Ray clients into database
+        $xrayClients = $details['clients'] ?? [];
+        $clientsTable = $details['clients_table'] ?? [];
+        $serverData = $server->getData();
+        $imported = 0;
+
+        // Build name lookup from clientsTable
+        $nameById = [];
+        if (is_array($clientsTable)) {
+            foreach ($clientsTable as $entry) {
+                $cid = $entry['clientId'] ?? '';
+                $cname = $entry['userData']['clientName'] ?? null;
+                if ($cid !== '' && $cname) {
+                    $nameById[$cid] = $cname;
+                }
+            }
+        }
+
+        if (is_array($xrayClients)) {
+            foreach ($xrayClients as $xClient) {
+                $uuid = $xClient['id'] ?? '';
+                if ($uuid === '') continue;
+
+                // Check if client already exists by public_key (UUID used as identifier)
+                $chk = $pdo->prepare('SELECT id FROM vpn_clients WHERE server_id = ? AND public_key = ?');
+                $chk->execute([$serverId, $uuid]);
+                if ($chk->fetch()) {
+                    continue;
+                }
+
+                // Also check by login
+                $email = $xClient['email'] ?? '';
+                if ($email !== '') {
+                    $chk2 = $pdo->prepare('SELECT id FROM vpn_clients WHERE server_id = ? AND login = ?');
+                    $chk2->execute([$serverId, $email]);
+                    if ($chk2->fetch()) {
+                        continue;
+                    }
+                }
+
+                $name = $nameById[$uuid] ?? ($email !== '' ? $email : 'xray-' . substr($uuid, 0, 8));
+
+                // Generate VLESS config URL for the client
+                $host = $serverData['host'] ?? '';
+                $realityPub = $details['reality_public_key'] ?? '';
+                $shortId = $details['reality_short_id'] ?? '';
+                $sni = $details['reality_server_name'] ?? '';
+                $flow = $xClient['flow'] ?? 'xtls-rprx-vision';
+
+                $vlessUrl = sprintf(
+                    'vless://%s@%s:%d?type=tcp&security=reality&pbk=%s&fp=chrome&sni=%s&sid=%s&spx=%%2F&flow=%s#%s',
+                    $uuid,
+                    $host,
+                    $port,
+                    urlencode($realityPub),
+                    urlencode($sni),
+                    urlencode($shortId),
+                    urlencode($flow),
+                    urlencode($name)
+                );
+
+                $ins = $pdo->prepare('INSERT INTO vpn_clients (server_id, user_id, name, client_ip, public_key, private_key, preshared_key, login, config, protocol_id, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())');
+                $ins->execute([
+                    $serverId,
+                    $serverData['user_id'] ?? null,
+                    $name,
+                    '',
+                    $uuid,        // Store UUID as public_key for X-Ray clients
+                    '',
+                    '',
+                    $email !== '' ? $email : $uuid,
+                    $vlessUrl,
+                    $pid ?: null,
+                    'active'      // Import as active since they work on the server
+                ]);
+                $imported++;
+                Logger::appendInstall($serverId, "Imported X-Ray client: {$name} ({$uuid})");
+            }
+        }
+
+        Logger::appendInstall($serverId, "X-Ray restore complete: imported {$imported} clients");
+
+        return [
+            'success' => true,
+            'mode' => 'restore',
+            'message' => 'Существующая конфигурация X-Ray восстановлена',
+            'port' => $port,
+            'clients_count' => count($xrayClients),
+            'imported_clients' => $imported,
+            'reality_public_key' => $details['reality_public_key'] ?? null,
+        ];
+    }
+
+    /**
+     * Import existing AWG clients from server into database (called during activate with existing config)
+     */
+    private static function importExistingAwgClients(VpnServer $server, array $protocol, array $detection): void
+    {
+        $details = $detection['details'] ?? [];
+        $containerName = $details['container_name'] ?? 'amnezia-awg';
+        $containerArg = escapeshellarg($containerName);
+        $serverId = $server->getId();
+        $pdo = DB::conn();
+        $serverData = $server->getData();
+        $pid = self::resolveProtocolId($protocol);
+
+        // Read wg0.conf and clientsTable
+        $wgConfig = $server->executeCommand("docker exec -i {$containerArg} cat /opt/amnezia/awg/wg0.conf 2>/dev/null", true);
+        $tableRaw = $server->executeCommand("docker exec -i {$containerArg} cat /opt/amnezia/awg/clientsTable 2>/dev/null", true);
+        $clientsTable = json_decode(trim($tableRaw), true);
+
+        // Build name lookup
+        $nameByPub = [];
+        if (is_array($clientsTable)) {
+            foreach ($clientsTable as $entry) {
+                $cid = $entry['clientId'] ?? '';
+                $uname = $entry['userData']['clientName'] ?? null;
+                if ($cid !== '' && $uname) {
+                    $nameByPub[$cid] = $uname;
+                }
+            }
+        }
+
+        $imported = 0;
+        if (trim($wgConfig) !== '') {
+            $pattern = '/\[Peer\][^\[]*?PublicKey\s*=\s*(.+?)\s*[\r\n]+[\s\S]*?AllowedIPs\s*=\s*(.+?)(?:\r?\n|$)/';
+            if (preg_match_all($pattern, $wgConfig, $matches, PREG_SET_ORDER)) {
+                foreach ($matches as $m) {
+                    $pub = trim($m[1]);
+                    $allowed = trim($m[2]);
+                    $clientIp = null;
+                    foreach (explode(',', $allowed) as $ipSpec) {
+                        $ipSpec = trim($ipSpec);
+                        if (preg_match('/^([0-9\.]+)\/32$/', $ipSpec, $mm)) {
+                            $clientIp = $mm[1];
+                            break;
+                        }
+                    }
+                    if (!$clientIp) continue;
+
+                    // Check if client already exists
+                    $chk = $pdo->prepare('SELECT id FROM vpn_clients WHERE server_id = ? AND (client_ip = ? OR public_key = ?)');
+                    $chk->execute([$serverId, $clientIp, $pub]);
+                    if ($chk->fetch()) continue;
+
+                    $name = $nameByPub[$pub] ?? ('import-' . str_replace('.', '_', $clientIp));
+                    $ins = $pdo->prepare('INSERT INTO vpn_clients (server_id, user_id, name, client_ip, public_key, private_key, preshared_key, config, protocol_id, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())');
+                    $ins->execute([
+                        $serverId,
+                        $serverData['user_id'] ?? null,
+                        $name,
+                        $clientIp,
+                        $pub,
+                        '',
+                        $details['preshared_key'] ?? null,
+                        '',
+                        $pid ?: null,
+                        'active'  // Import as active since they exist on the server
+                    ]);
+                    $imported++;
+                    Logger::appendInstall($serverId, "Imported AWG client: {$name} ({$clientIp})");
+                }
+            }
+        }
+
+        Logger::appendInstall($serverId, "AWG client import complete: imported {$imported} clients");
     }
 }
