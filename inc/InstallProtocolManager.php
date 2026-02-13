@@ -1735,10 +1735,10 @@ class InstallProtocolManager
                     continue;
                 }
 
-                // Also check by login
+                // Also check by name/email
                 $email = $xClient['email'] ?? '';
                 if ($email !== '') {
-                    $chk2 = $pdo->prepare('SELECT id FROM vpn_clients WHERE server_id = ? AND login = ?');
+                    $chk2 = $pdo->prepare('SELECT id FROM vpn_clients WHERE server_id = ? AND name = ?');
                     $chk2->execute([$serverId, $email]);
                     if ($chk2->fetch()) {
                         continue;
@@ -1766,16 +1766,15 @@ class InstallProtocolManager
                     urlencode($name)
                 );
 
-                $ins = $pdo->prepare('INSERT INTO vpn_clients (server_id, user_id, name, client_ip, public_key, private_key, preshared_key, login, config, protocol_id, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())');
+                $ins = $pdo->prepare('INSERT INTO vpn_clients (server_id, user_id, name, client_ip, public_key, private_key, preshared_key, config, protocol_id, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())');
                 $ins->execute([
                     $serverId,
                     $serverData['user_id'] ?? null,
                     $name,
-                    '',
+                    $uuid,        // Use UUID as client_ip (unique key requires non-empty value)
                     $uuid,        // Store UUID as public_key for X-Ray clients
                     '',
                     '',
-                    $email !== '' ? $email : $uuid,
                     $vlessUrl,
                     $pid ?: null,
                     'active'      // Import as active since they work on the server
