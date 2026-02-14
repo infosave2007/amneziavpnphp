@@ -1749,13 +1749,9 @@ class InstallProtocolManager
 
                 $name = $nameById[$uuid] ?? ($email !== '' ? $email : 'xray-' . substr($uuid, 0, 8));
 
-                // Allocate a proper IP address for the client instead of using UUID
-                try {
-                    $clientIp = VpnClient::getNextClientIP($serverData);
-                } catch (Throwable $e) {
-                    // Fallback to UUID if IP allocation fails
-                    $clientIp = $uuid;
-                }
+                // X-Ray config does not store per-client tunnel IP like WireGuard.
+                // Keep client_ip deterministic from config client id (UUID) during restore.
+                $clientIp = $uuid;
 
                 // Generate VLESS config URL for the client
                 $host = $serverData['host'] ?? '';
@@ -1781,8 +1777,8 @@ class InstallProtocolManager
                     $serverId,
                     $serverData['user_id'] ?? null,
                     $name,
-                    $clientIp,        // Use allocated IP address
-                    $uuid,        // Store UUID as public_key for X-Ray clients
+                    $clientIp,
+                    $uuid,
                     '',
                     '',
                     $vlessUrl,
