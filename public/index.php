@@ -267,7 +267,7 @@ Router::get('/dashboard', function () {
 
     // Get real-time online clients count from Xray API
     $onlineData = ServerMonitoring::countOnlineClients();
-    
+
     // Also count clients with recent handshake (within 5 minutes) for WireGuard/AWG
     $pdo = DB::conn();
     $stmt = $pdo->query("
@@ -276,8 +276,8 @@ Router::get('/dashboard', function () {
         AND last_handshake > DATE_SUB(NOW(), INTERVAL 5 MINUTE)
         AND status = 'active'
     ");
-    $recentHandshakeCount = (int)$stmt->fetchColumn();
-    
+    $recentHandshakeCount = (int) $stmt->fetchColumn();
+
     // Combine both counts (XRay online + recent handshake), avoiding duplicates
     $totalOnline = max($onlineData['total'], $recentHandshakeCount);
 
@@ -2709,7 +2709,7 @@ Router::post('/api/servers/{id}/protocols/selftest', function ($params) {
             $err = (string) ($derived['error'] ?? 'derive_failed');
             // If we can't derive locally (e.g., libsodium missing), fall back to wg inside container.
             if ($err === 'libsodium_not_available') {
-                $shComputePub = "set -e; priv=" . escapeshellarg($cfgPrivate) . "; printf '%s' \"$priv\" | wg pubkey";
+                $shComputePub = "set -e; priv=" . escapeshellarg($cfgPrivate) . "; printf '%s' \"\$priv\" | wg pubkey";
                 $cmdComputePub = "docker exec -i " . escapeshellarg($containerName) . " sh -c " . escapeshellarg($shComputePub);
                 $computedClientPub = trim($server->executeCommand($cmdComputePub, true));
             } else {
@@ -2949,7 +2949,7 @@ Router::post('/api/servers/{id}/protocols/diagnose-handshake', function ($params
                 } else {
                     $clientPubError = (string) ($derived['error'] ?? 'derive_failed');
                     // Fallback: compute using wg inside container (best-effort)
-                    $shComputePub = "set -e; priv=" . escapeshellarg($cfgPrivate) . "; printf '%s' \"$priv\" | wg pubkey";
+                    $shComputePub = "set -e; priv=" . escapeshellarg($cfgPrivate) . "; printf '%s' \"\$priv\" | wg pubkey";
                     $cmdComputePub = "docker exec -i " . escapeshellarg($containerName) . " sh -c " . escapeshellarg($shComputePub);
                     $computed = trim((string) $server->executeCommand($cmdComputePub, true));
                     // Basic validation: wg outputs a 44-char base64 key
