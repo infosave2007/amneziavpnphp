@@ -23,5 +23,11 @@
     "psr-4": {
       "": "inc/"
     }
+  },
+  "config": {
+    "audit": {
+      "abandoned": "ignore",
+      "ignore": ["PKSA-y2cr-5h3j-g3ys"]
+    }
   }
 }

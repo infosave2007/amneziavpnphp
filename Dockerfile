@@ -29,7 +29,8 @@ WORKDIR /var/www/html
 COPY . /var/www/html
 
 # Install PHP dependencies
-RUN composer install --no-dev --optimize-autoloader
+# Добавляем папку в исключения Git и устанавливаем зависимости
+RUN git config --global --add safe.directory /var/www/html && composer install --no-dev --optimize-autoloader --no-security-blocking
 
 # Configure Apache
 COPY apache.conf /etc/apache2/sites-available/000-default.conf
