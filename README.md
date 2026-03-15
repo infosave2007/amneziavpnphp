@@ -30,11 +30,10 @@ cp .env.example .env
 
 # For Docker Compose V2 (recommended)
 docker compose up -d
-docker compose exec web composer install
-
+docker compose exec web bash -c "composer config audit.abandoned ignore && composer config audit.ignore PKSA-y2cr-5h3j-g3ys && composer install --no-dev --optimize-autoloader"
 # Or for older Docker Compose V1
 docker-compose up -d
-docker-compose exec web composer install
+docker-compose exec web bash -c "composer config audit.abandoned ignore && composer config audit.ignore PKSA-y2cr-5h3j-g3ys && composer install --no-dev --optimize-autoloader"
 ```
 
 Access: http://localhost:8082
