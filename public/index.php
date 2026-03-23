@@ -1262,7 +1262,8 @@ Router::get('/api/clients/{id}/qr', function ($params) {
         
         echo json_encode([
             'success' => true,
-            'qr_code' => $clientData['qr_code'],
+            'qr_code_vpn' => $clientData['qr_code_vpn'],
+            'qr_code_awg' => $clientData['qr_code_awg'],
             'client_name' => $clientData['name']
         ]);
     } catch (Exception $e) {

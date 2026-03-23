@@ -143,13 +143,21 @@
     </div>
   </div>
   
-  {% if client.qr_code %}
+  {% if client.qr_code_vpn %}
   <div class="bg-white rounded shadow p-6 text-center">
     <h3 class="font-bold mb-4">QR Code</h3>
-    <img src="{{ client.qr_code }}" alt="QR Code" class="mx-auto" style="max-width: 300px; width: 100%; height: auto;">
+    <img src="{{ client.qr_code_vpn }}" alt="QR Code" class="mx-auto" style="max-width: 300px; width: 100%; height: auto;">
     <p class="text-sm text-gray-600 mt-2">Scan with Amnezia VPN app</p>
   </div>
   {% endif %}
+  {% if client.qr_code_awg %}
+  <div class="bg-white rounded shadow p-6 text-center">
+    <h3 class="font-bold mb-4">QR Code</h3>
+    <img src="{{ client.qr_code_awg }}" alt="QR Code" class="mx-auto" style="max-width: 300px; width: 100%; height: auto;">
+    <p class="text-sm text-gray-600 mt-2">Scan with AmneziaWG app</p>
+  </div>
+  {% endif %}
+
 </div>
 
 <script>

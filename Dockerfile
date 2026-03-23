@@ -29,7 +29,7 @@ WORKDIR /var/www/html
 COPY . /var/www/html
 
 # Install PHP dependencies
-RUN composer install --no-dev --optimize-autoloader
+RUN composer install --no-dev --optimize-autoloader --no-security-blocking
 
 # Configure Apache
 COPY apache.conf /etc/apache2/sites-available/000-default.conf
@@ -55,10 +55,10 @@ RUN chmod +x /var/www/html/bin/monitor_metrics.sh
 
 # Create startup script
 RUN echo '#!/bin/bash\n\
-service cron start\n\
-# Start metrics collector on container startup\n\
-/bin/bash /var/www/html/bin/monitor_metrics.sh\n\
-apache2-foreground' > /start.sh \
+    service cron start\n\
+    # Start metrics collector on container startup\n\
+    /bin/bash /var/www/html/bin/monitor_metrics.sh\n\
+    apache2-foreground' > /start.sh \
     && chmod +x /start.sh
 
 # Expose port 80
