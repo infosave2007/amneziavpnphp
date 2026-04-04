@@ -428,10 +428,12 @@ class VpnServer
     public function executeCommand(string $command, bool $sudo = false): string
     {
         $baseCommand = $command;
-        $escapedCommand = escapeshellarg($command);
+        $pathPrefix = 'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; ';
+        $escapedCommand = '';
+        $needsSudo = false;
 
         // Determine auth method
-        $sshOptions = '-q -o LogLevel=ERROR -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no';
+        $sshOptions = '-o LogLevel=ERROR -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no';
         $keyFile = '';
 
         if (!empty($this->data['ssh_key'])) {
@@ -439,6 +441,9 @@ class VpnServer
             file_put_contents($keyFile, $this->data['ssh_key']);
             chmod($keyFile, 0600);
             $sshOptions .= " -i {$keyFile} -o IdentitiesOnly=yes -o PubkeyAuthentication=yes -o PreferredAuthentications=publickey";
+
+            $preparedCommand = $pathPrefix . $command;
+            $escapedCommand = escapeshellarg($preparedCommand);
 
             $sshCommand = sprintf(
                 "ssh -p %d %s %s@%s %s 2>&1",
@@ -453,8 +458,10 @@ class VpnServer
             if ($needsSudo) {
                 // Suppress sudo prompt text to keep command output machine-parseable.
                 $command = "echo '{$this->data['password']}' | sudo -S -p '' " . $command;
-                $escapedCommand = escapeshellarg($command);
             }
+
+            $preparedCommand = $pathPrefix . $command;
+            $escapedCommand = escapeshellarg($preparedCommand);
 
             $sshOptions .= " -o PreferredAuthentications=password -o PubkeyAuthentication=no";
             $sshCommand = sprintf(
@@ -477,7 +484,7 @@ class VpnServer
             && preg_match('/(^|\\n)docker(\\s|$)/', ltrim($baseCommand))
             && preg_match('/incorrect password attempts|sorry, try again|a password is required/i', $output)
         ) {
-            $escapedBaseCommand = escapeshellarg($baseCommand);
+            $escapedBaseCommand = escapeshellarg($pathPrefix . $baseCommand);
             $sshCommandNoSudo = sprintf(
                 "sshpass -p '%s' ssh -p %d %s %s@%s %s 2>&1",
                 $this->data['password'],

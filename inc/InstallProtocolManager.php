@@ -375,8 +375,27 @@ class InstallProtocolManager
         $containerFilter = escapeshellarg('^' . $containerName . '$');
         $containerArg = escapeshellarg($containerName);
 
-        $containerList = trim($server->executeCommand("docker ps -a --filter name={$containerFilter} --format '{{.Names}}'", true));
-        if ($containerList === '') {
+        $containerListRaw = trim($server->executeCommand("docker ps -a --filter name={$containerFilter} --format '{{.Names}}'", true));
+        if ($containerListRaw === '') {
+            return [
+                'status' => 'absent',
+                'message' => 'Контейнер AmneziaWG не найден на сервере'
+            ];
+        }
+
+        if (preg_match('/docker: command not found|command not found|cannot connect to the docker daemon|permission denied/i', $containerListRaw)) {
+            return [
+                'status' => 'absent',
+                'message' => 'Docker CLI недоступен на сервере',
+                'details' => [
+                    'container_name' => $containerName,
+                    'container_status' => $containerListRaw,
+                ]
+            ];
+        }
+
+        $containerNames = array_values(array_filter(array_map('trim', preg_split('/\R+/', $containerListRaw))));
+        if (!in_array($containerName, $containerNames, true)) {
             return [
                 'status' => 'absent',
                 'message' => 'Контейнер AmneziaWG не найден на сервере'
@@ -592,6 +611,29 @@ class InstallProtocolManager
         $script = self::renderTemplate($scripts, $context);
         $script = preg_replace('/\n\+\s*/', "\n", $script);
         $exportLines = self::buildExports($context);
+
+        if ($phase === 'install') {
+            Logger::appendInstall($server->getId(), 'INSTALL phase: docker preflight start');
+            $bootstrapCmd = "bash -lc 'set -e; "
+                . "if command -v docker >/dev/null 2>&1; then command -v docker; docker --version || true; exit 0; fi; "
+                . "if command -v curl >/dev/null 2>&1; then curl -fsSL https://get.docker.com | sh; "
+                . "elif command -v wget >/dev/null 2>&1; then wget -qO- https://get.docker.com | sh; "
+                . "else echo \"curl/wget not found\"; exit 127; fi; "
+                . "(systemctl enable --now docker || service docker start || true); "
+                . "command -v docker >/dev/null 2>&1 || { echo \"docker bootstrap failed\"; exit 127; }; "
+                . "command -v docker; docker --version || true'";
+            $bootstrapOut = trim((string) $server->executeCommand($bootstrapCmd, true));
+            if ($bootstrapOut !== '') {
+                $bootstrapHead = substr(str_replace(["\r", "\n"], ' ', $bootstrapOut), 0, 280);
+                Logger::appendInstall($server->getId(), 'INSTALL phase: docker preflight output ' . $bootstrapHead);
+            }
+
+            $dockerCheckAfter = trim((string) $server->executeCommand('command -v docker || true', true));
+            if ($dockerCheckAfter === '') {
+                throw new Exception('Docker не установлен на сервере и авто-установка не удалась');
+            }
+        }
+
         $wrapper = "bash <<'EOS'\nset -euo pipefail\n" . $exportLines . $script . "\nEOS";
         Logger::appendInstall($server->getId(), strtoupper($phase) . ' phase: executing remote script');
         $output = $server->executeCommand($wrapper, true);
@@ -601,12 +643,42 @@ class InstallProtocolManager
             Logger::appendInstall($server->getId(), strtoupper($phase) . ' phase: output head ' . $head);
         }
         $trimmed = trim($output);
+        $installProbeSummary = '';
+
+        if ($phase === 'install' && $trimmed === '') {
+            $probeCmd = "echo whoami:\$(whoami) 2>/dev/null || true; echo shell:\$SHELL; command -v docker || echo docker:not-found; docker --version 2>&1 || true; id 2>&1 || true";
+            $probeOut = trim((string) $server->executeCommand($probeCmd, true));
+            if ($probeOut !== '') {
+                $normalizedProbe = substr(str_replace(["\r", "\n"], ' | ', $probeOut), 0, 320);
+                Logger::appendInstall($server->getId(), strtoupper($phase) . ' phase: probe ' . $normalizedProbe);
+                $installProbeSummary = '; probe: ' . $normalizedProbe;
+            }
+        }
 
         // Try JSON first
         $decoded = json_decode($trimmed, true);
         if (is_array($decoded)) {
             Logger::appendInstall($server->getId(), strtoupper($phase) . ' phase: parsed JSON result');
             return $decoded;
+        }
+
+        if ($phase === 'install') {
+            $lower = strtolower($trimmed);
+            $hardErrors = [
+                'connection refused',
+                'permission denied',
+                'command not found',
+                'no route to host',
+                'could not resolve hostname',
+                'host key verification failed',
+                'timed out',
+                'operation timed out',
+            ];
+            foreach ($hardErrors as $needle) {
+                if ($needle !== '' && strpos($lower, $needle) !== false) {
+                    throw new Exception('Ошибка установки (script): ' . $trimmed);
+                }
+            }
         }
 
         // Try key-value format (e.g., "Port: 123" or "Server Public Key: abc")
@@ -620,7 +692,7 @@ class InstallProtocolManager
         if ($phase === 'install') {
             $lower = strtolower($trimmed);
             if ($lower === '' || strpos($lower, 'command not found') !== false || strpos($lower, 'error') !== false) {
-                throw new Exception('Ошибка установки (script): ' . ($trimmed !== '' ? $trimmed : 'empty output'));
+                throw new Exception('Ошибка установки (script): ' . ($trimmed !== '' ? $trimmed : 'empty output') . $installProbeSummary);
             }
         }
 
@@ -1353,9 +1425,17 @@ class InstallProtocolManager
             }
             return $res;
         } catch (Throwable $e) {
-            self::markServerError($serverId, $e->getMessage());
-            Logger::appendInstall($serverId, 'Activate failed: ' . $e->getMessage());
-            throw $e;
+            $message = (string) $e->getMessage();
+            if (
+                stripos($message, 'server_protocols_ibfk_1') !== false
+                || (stripos($message, 'foreign key constraint fails') !== false && stripos($message, 'server_protocols') !== false)
+            ) {
+                $message = 'Сервер был удален или пересоздан во время установки. Обновите страницу и запустите установку заново.';
+            }
+
+            self::markServerError($serverId, $message);
+            Logger::appendInstall($serverId, 'Activate failed: ' . $message);
+            throw new Exception($message, 0, $e);
         }
     }
 
@@ -1777,8 +1857,27 @@ class InstallProtocolManager
         $containerFilter = escapeshellarg('^' . $containerName . '$');
         $containerArg = escapeshellarg($containerName);
 
-        $containerList = trim($server->executeCommand("docker ps -a --filter name={$containerFilter} --format '{{.Names}}'", true));
-        if ($containerList === '') {
+        $containerListRaw = trim($server->executeCommand("docker ps -a --filter name={$containerFilter} --format '{{.Names}}'", true));
+        if ($containerListRaw === '') {
+            return [
+                'status' => 'absent',
+                'message' => 'Контейнер X-Ray не найден на сервере'
+            ];
+        }
+
+        if (preg_match('/docker: command not found|command not found|cannot connect to the docker daemon|permission denied/i', $containerListRaw)) {
+            return [
+                'status' => 'absent',
+                'message' => 'Docker CLI недоступен на сервере',
+                'details' => [
+                    'container_name' => $containerName,
+                    'container_status' => $containerListRaw,
+                ]
+            ];
+        }
+
+        $containerNames = array_values(array_filter(array_map('trim', preg_split('/\R+/', $containerListRaw))));
+        if (!in_array($containerName, $containerNames, true)) {
             return [
                 'status' => 'absent',
                 'message' => 'Контейнер X-Ray не найден на сервере'
