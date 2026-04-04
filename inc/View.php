@@ -2,6 +2,7 @@
 use Twig\Environment;
 use Twig\Loader\FilesystemLoader;
 use Twig\TwigFunction;
+use Twig\TwigFilter;
 
 class View {
   private static ?Environment $twig = null;
@@ -35,6 +36,22 @@ class View {
       return $flags[$langCode] ?? '🌐';
     });
     self::$twig->addFunction($flagFunc);
+
+    // Add bytes format filter
+    $bytesFilter = new TwigFilter('bytes_format', function (int $bytes, int $precision = 2): string {
+      $units = ['B', 'KB', 'MB', 'GB', 'TB'];
+      for ($i = 0; $bytes > 1024 && $i < count($units) - 1; $i++) {
+        $bytes /= 1024;
+      }
+      return round($bytes, $precision) . ' ' . $units[$i];
+    });
+    self::$twig->addFilter($bytesFilter);
+
+    // Add translation filter (alias: trans)
+    $transFilter = new TwigFilter('trans', function (string $key, array $params = []) {
+      return Translator::t($key, $params);
+    });
+    self::$twig->addFilter($transFilter);
 
     // Add globals
     foreach ($globals as $k => $v) self::$twig->addGlobal($k, $v);

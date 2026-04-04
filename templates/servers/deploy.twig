@@ -2,55 +2,136 @@
 {% block title %}Deploy {{ server.name }}{% endblock %}
 {% block content %}
 <div class="max-w-4xl mx-auto px-4 py-8">
-  <h1 class="text-2xl font-bold mb-6">Deploying: {{ server.name }}</h1>
+  <h1 class="text-2xl font-bold mb-1">Deploying: {{ server.name }}</h1>
+  <p class="text-sm text-gray-400 mb-6">Protocol: {{ server.install_protocol ?? 'amnezia-wg' }}</p>
   <div id="deployLog" class="bg-gray-900 text-green-400 p-4 rounded font-mono text-sm h-96 overflow-y-auto mb-4">
     <div>Ready to deploy...</div>
   </div>
+  <div id="deployActions" class="flex gap-3 mb-4 hidden"></div>
   <button id="deployBtn" onclick="deploy()" class="gradient-bg text-white px-6 py-2 rounded hover:opacity-90 transition-all disabled:opacity-50 disabled:cursor-not-allowed">
     <span id="btnText">Start Deployment</span>
     <i id="btnSpinner" class="fas fa-spinner fa-spin ml-2 hidden"></i>
   </button>
 </div>
 <script>
-function deploy() {
+let pendingDecisionToken = null;
+
+function setButtonState(isProcessing, label) {
   const btn = document.getElementById('deployBtn');
   const btnText = document.getElementById('btnText');
   const btnSpinner = document.getElementById('btnSpinner');
+  btn.disabled = isProcessing;
+  btnText.textContent = label;
+  if (isProcessing) {
+    btnSpinner.classList.remove('hidden');
+  } else {
+    btnSpinner.classList.add('hidden');
+  }
+}
+
+function appendLog(message, cssClass) {
   const log = document.getElementById('deployLog');
-  
-  // Disable button and show spinner
-  btn.disabled = true;
-  btnText.textContent = 'Deploying...';
-  btnSpinner.classList.remove('hidden');
-  
-  log.innerHTML = '<div>📡 Connecting to server...</div>';
-  log.innerHTML += '<div>🔧 Installing Docker...</div>';
-  log.innerHTML += '<div>📦 Building container...</div>';
-  log.innerHTML += '<div>🔐 Generating keys...</div>';
-  log.innerHTML += '<div>⚙️  Configuring WireGuard...</div>';
-  
-  fetch('/servers/{{ server.id }}/deploy', {method: 'POST'})
-    .then(r => r.json())
-    .then(d => {
-      if (d.success) {
-        log.innerHTML += '<div class="text-green-500 font-bold">✅ Deployment successful!</div>';
-        log.innerHTML += '<div class="text-yellow-300">🔌 VPN Port: ' + d.vpn_port + '</div>';
-        log.innerHTML += '<div class="text-yellow-300">🔑 Public Key: ' + d.public_key.substring(0, 40) + '...</div>';
-        btnText.textContent = 'Redirecting...';
-        btnSpinner.classList.add('hidden');
+  const line = document.createElement('div');
+  if (cssClass) {
+    line.className = cssClass;
+  }
+  line.innerHTML = message;
+  log.appendChild(line);
+  log.scrollTop = log.scrollHeight;
+}
+
+function hideActions() {
+  const actions = document.getElementById('deployActions');
+  actions.classList.add('hidden');
+  actions.innerHTML = '';
+}
+
+function showActions(options) {
+  const actions = document.getElementById('deployActions');
+  actions.innerHTML = '';
+  Object.keys(options || {}).forEach(key => {
+    const option = options[key];
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.textContent = option.label || key;
+    btn.className = 'px-4 py-2 rounded bg-white text-gray-800 border border-gray-200 shadow-sm hover:bg-gray-50 transition';
+    btn.onclick = function () {
+      hideActions();
+      deploy(option.mode || key);
+    };
+    actions.appendChild(btn);
+  });
+  if (actions.childElementCount > 0) {
+    actions.classList.remove('hidden');
+  }
+}
+
+function deploy(mode) {
+  const payload = {};
+  if (mode) {
+    payload.install_mode = mode;
+  }
+  if (pendingDecisionToken) {
+    payload.decision_token = pendingDecisionToken;
+  }
+
+  if (!mode) {
+    pendingDecisionToken = null;
+    document.getElementById('deployLog').innerHTML = '';
+    appendLog('📡 Connecting to server...');
+    appendLog('🔧 Preparing environment...');
+  }
+
+  hideActions();
+  setButtonState(true, mode ? 'Processing...' : 'Deploying...');
+
+  fetch('/servers/{{ server.id }}/deploy', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  })
+    .then(async response => {
+      const data = await response.json().catch(() => ({ success: false, error: 'Invalid server response' }));
+      if (!response.ok && !data.requires_action) {
+        throw new Error(data.error || ('HTTP ' + response.status));
+      }
+      return data;
+    })
+    .then(data => {
+      if (data.requires_action) {
+        pendingDecisionToken = data.decision_token || null;
+        const details = data.details || {};
+        appendLog('⚠️ ' + (details.message || 'Existing configuration detected'), 'text-yellow-300');
+        if (details.details && details.details.summary) {
+          appendLog(details.details.summary, 'text-yellow-200');
+        } else if (details.details) {
+          appendLog(JSON.stringify(details.details), 'text-yellow-200 text-xs');
+        }
+        showActions(data.options);
+        setButtonState(false, 'Select action');
+        return;
+      }
+
+      if (data.success) {
+        pendingDecisionToken = null;
+        hideActions();
+        appendLog('✅ Deployment successful!', 'text-green-500 font-bold');
+        if (data.vpn_port) {
+          appendLog('🔌 VPN Port: ' + data.vpn_port, 'text-yellow-300');
+        }
+        if (data.public_key) {
+          appendLog('🔑 Public Key: ' + data.public_key.substring(0, 40) + '...', 'text-yellow-300');
+        }
+        setButtonState(true, 'Redirecting...');
         setTimeout(() => window.location.href = '/servers/{{ server.id }}', 2000);
       } else {
-        log.innerHTML += '<div class="text-red-500 font-bold">❌ Error: ' + (d.error || 'Unknown error') + '</div>';
-        btn.disabled = false;
-        btnText.textContent = 'Retry Deployment';
-        btnSpinner.classList.add('hidden');
+        appendLog('❌ ' + (data.error || 'Unknown error'), 'text-red-500 font-bold');
+        setButtonState(false, 'Retry Deployment');
       }
     })
-    .catch(e => {
-      log.innerHTML += '<div class="text-red-500 font-bold">❌ Network error: ' + e.message + '</div>';
-      btn.disabled = false;
-      btnText.textContent = 'Retry Deployment';
-      btnSpinner.classList.add('hidden');
+    .catch(error => {
+      appendLog('❌ Network error: ' + error.message, 'text-red-500 font-bold');
+      setButtonState(false, 'Retry Deployment');
     });
 }
 </script>

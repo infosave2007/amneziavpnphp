@@ -10,6 +10,7 @@
 
 require_once __DIR__ . '/../vendor/autoload.php';
 require_once __DIR__ . '/../inc/Config.php';
+Config::load(__DIR__ . '/../.env');
 require_once __DIR__ . '/../inc/DB.php';
 require_once __DIR__ . '/../inc/VpnServer.php';
 require_once __DIR__ . '/../inc/VpnClient.php';
@@ -54,6 +55,17 @@ while (true) {
                 echo "[" . date('Y-m-d H:i:s') . "] Collecting metrics for server #{$server['id']} ({$server['name']})\n";
                 
                 $monitoring = new ServerMonitoring($server['id']);
+                
+                // Enforce single IP per user for Xray servers
+                $containerName = $server['container_name'] ?? '';
+                if (strpos($containerName, 'xray') !== false) {
+                    $monitoring->enforceXraySingleIpPerUser();
+                }
+                
+                // Enforce single IP per peer for AWG servers
+                if (strpos($containerName, 'awg') !== false || strpos($containerName, 'wireguard') !== false) {
+                    $monitoring->enforceAwgSingleIpPerPeer();
+                }
                 
                 // Collect server metrics
                 $serverMetrics = $monitoring->collectMetrics();

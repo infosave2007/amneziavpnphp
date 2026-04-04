@@ -1,0 +1,246 @@
+{% extends "layout.twig" %}
+
+{% block content %}
+<div class="container mt-4">
+    <div class="row">
+        <div class="col-md-12">
+            <div class="d-flex justify-content-between align-items-center mb-4">
+                <div>
+                    <h1>{{ scenario.name }}</h1>
+                    <small class="text-muted">{{ scenario.slug }}</small>
+                </div>
+                <div class="btn-group">
+                    <a href="/admin/scenario/{{ scenario.id }}/edit" class="btn btn-primary">
+                        <i class="fas fa-edit"></i> {{ 'Редактировать' | trans }}
+                    </a>
+                    <a href="/admin/scenario/{{ scenario.id }}/export" class="btn btn-secondary">
+                        <i class="fas fa-download"></i> {{ 'Экспорт' | trans }}
+                    </a>
+                    <a href="/admin/scenarios" class="btn btn-light">
+                        <i class="fas fa-arrow-left"></i> {{ 'Назад' | trans }}
+                    </a>
+                </div>
+            </div>
+
+            <!-- Scenario Info -->
+            <div class="card mb-3">
+                <div class="card-header">
+                    <h5 class="mb-0">{{ 'Информация о сценарии' | trans }}</h5>
+                </div>
+                <div class="card-body">
+                    <div class="row">
+                        <div class="col-md-6">
+                            <dl>
+                                <dt>{{ 'Статус' | trans }}</dt>
+                                <dd>
+                                    {% if scenario.is_active %}
+                                        <span class="badge bg-success">{{ 'Активный' | trans }}</span>
+                                    {% else %}
+                                        <span class="badge bg-secondary">{{ 'Отключен' | trans }}</span>
+                                    {% endif %}
+                                </dd>
+                                <dt>{{ 'Движок' | trans }}</dt>
+                                <dd><code>{{ definition.engine | default('unknown') }}</code></dd>
+                                <dt>{{ 'Описание' | trans }}</dt>
+                                <dd>{{ scenario.description | default('—') }}</dd>
+                            </dl>
+                        </div>
+                        <div class="col-md-6">
+                            <dl>
+                                <dt>{{ 'Контейнер' | trans }}</dt>
+                                <dd><code>{{ definition.metadata.container_name | default('—') }}</code></dd>
+                                <dt>{{ 'Путь конфигурации' | trans }}</dt>
+                                <dd><code>{{ definition.metadata.config_path | default('—') }}</code></dd>
+                                <dt>{{ 'Порт по умолчанию' | trans }}</dt>
+                                <dd>{{ definition.metadata.default_port | default('—') }}</dd>
+                            </dl>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Scripts Info -->
+            <div class="card mb-3">
+                <div class="card-header">
+                    <h5 class="mb-0">{{ 'Скрипты' | trans }}</h5>
+                </div>
+                <div class="card-body">
+                    <ul class="nav nav-tabs" role="tablist">
+                        <li class="nav-item" role="presentation">
+                            <button class="nav-link active" id="detect-tab" data-bs-toggle="tab" data-bs-target="#detect-content" type="button" role="tab">
+                                {{ 'Обнаружение (detect)' | trans }}
+                            </button>
+                        </li>
+                        <li class="nav-item" role="presentation">
+                            <button class="nav-link" id="install-tab" data-bs-toggle="tab" data-bs-target="#install-content" type="button" role="tab">
+                                {{ 'Установка (install)' | trans }}
+                            </button>
+                        </li>
+                        <li class="nav-item" role="presentation">
+                            <button class="nav-link" id="restore-tab" data-bs-toggle="tab" data-bs-target="#restore-content" type="button" role="tab">
+                                {{ 'Восстановление (restore)' | trans }}
+                            </button>
+                        </li>
+                    </ul>
+
+                    <div class="tab-content mt-3">
+                        <div class="tab-pane fade show active" id="detect-content" role="tabpanel">
+                            <pre class="bg-light p-3 rounded"><code>{{ definition.scripts.detect | default('—') }}</code></pre>
+                        </div>
+                        <div class="tab-pane fade" id="install-content" role="tabpanel">
+                            <pre class="bg-light p-3 rounded"><code>{{ definition.scripts.install | default('—') }}</code></pre>
+                        </div>
+                        <div class="tab-pane fade" id="restore-content" role="tabpanel">
+                            <pre class="bg-light p-3 rounded"><code>{{ definition.scripts.restore | default('—') }}</code></pre>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Metadata -->
+            <div class="card mb-3">
+                <div class="card-header">
+                    <h5 class="mb-0">{{ 'Метаданные' | trans }}</h5>
+                </div>
+                <div class="card-body">
+                    <pre class="bg-light p-3 rounded"><code>{{ definition.metadata | json_encode(constant('JSON_PRETTY_PRINT') | constant('JSON_UNESCAPED_SLASHES')) }}</code></pre>
+                </div>
+            </div>
+
+            <!-- Actions -->
+            <div class="card">
+                <div class="card-header">
+                    <h5 class="mb-0">{{ 'Действия' | trans }}</h5>
+                </div>
+                <div class="card-body">
+                    <button class="btn btn-info" id="testScenarioBtn">
+                        <i class="fas fa-flask"></i> {{ 'Тест на сервере' | trans }}
+                    </button>
+                    {% if scenario.slug != 'amnezia-wg' %}
+                        <button class="btn btn-danger" id="deleteScenarioBtn">
+                            <i class="fas fa-trash"></i> {{ 'Удалить сценарий' | trans }}
+                        </button>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Test Modal -->
+<div class="modal fade" id="testModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">{{ 'Тест сценария' | trans }} - {{ scenario.name }}</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="mb-3">
+                    <label for="testServer" class="form-label">{{ 'Выбрать сервер' | trans }}</label>
+                    <select class="form-control" id="testServer">
+                        <option value="">{{ 'Загружаю...' | trans }}</option>
+                    </select>
+                </div>
+                <div id="testResult" class="mt-3" style="display: none;">
+                    <strong>{{ 'Результат:' | trans }}</strong>
+                    <pre id="testResultContent" class="bg-light p-3 rounded" style="max-height: 400px; overflow-y: auto;"></pre>
+                </div>
+                <div id="testError" class="alert alert-danger mt-3" style="display: none;"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">{{ 'Закрыть' | trans }}</button>
+                <button type="button" class="btn btn-primary" id="runTestBtn">{{ 'Запустить тест' | trans }}</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const scenarioId = {{ scenario.id }};
+
+    // Test button
+    document.getElementById('testScenarioBtn').addEventListener('click', function() {
+        loadServers();
+        new bootstrap.Modal(document.getElementById('testModal')).show();
+    });
+
+    // Delete button
+    const deleteBtn = document.getElementById('deleteScenarioBtn');
+    if (deleteBtn) {
+        deleteBtn.addEventListener('click', function() {
+            if (confirm('{{ "Вы уверены? Это действие нельзя отменить." | trans }}')) {
+                fetch(`/admin/scenario/${scenarioId}/delete`, {method: 'POST'})
+                    .then(r => r.json())
+                    .then(data => {
+                        if (data.success) {
+                            window.location.href = data.redirect;
+                        } else {
+                            alert(`{{ "Ошибка:" | trans }} ${data.message}`);
+                        }
+                    });
+            }
+        });
+    }
+
+    // Load servers
+    async function loadServers() {
+        try {
+            const response = await fetch('/api/servers?limit=50');
+            const data = await response.json();
+            
+            const select = document.getElementById('testServer');
+            select.innerHTML = '';
+            
+            if (data.servers && data.servers.length > 0) {
+                data.servers.forEach(server => {
+                    const option = document.createElement('option');
+                    option.value = server.id;
+                    option.textContent = `${server.name} (${server.host})`;
+                    select.appendChild(option);
+                });
+            }
+        } catch (err) {
+            console.error('Error loading servers:', err);
+        }
+    }
+
+    // Run test
+    document.getElementById('runTestBtn').addEventListener('click', async function() {
+        const serverId = document.getElementById('testServer').value;
+        if (!serverId) {
+            alert('{{ "Выберите сервер" | trans }}');
+            return;
+        }
+
+        try {
+            const response = await fetch(`/admin/scenario/${scenarioId}/test`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                body: `server_id=${serverId}`
+            });
+            
+            const data = await response.json();
+            const resultDiv = document.getElementById('testResult');
+            const resultContent = document.getElementById('testResultContent');
+            const errorDiv = document.getElementById('testError');
+            
+            errorDiv.style.display = 'none';
+            
+            if (data.success) {
+                resultContent.textContent = JSON.stringify(data.result, null, 2);
+                resultDiv.style.display = 'block';
+            } else {
+                errorDiv.textContent = data.message;
+                errorDiv.style.display = 'block';
+            }
+        } catch (err) {
+            const errorDiv = document.getElementById('testError');
+            errorDiv.textContent = `{{ "Ошибка:" | trans }} ${err}`;
+            errorDiv.style.display = 'block';
+        }
+    });
+});
+</script>
+{% endblock %}

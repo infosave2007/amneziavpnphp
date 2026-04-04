@@ -4,17 +4,34 @@ Web-based management panel for Amnezia AWG (WireGuard) VPN servers.
 
 ## Features
 
-- VPN server deployment via SSH
+- VPN server deployment via SSH (Password or **SSH Key**)
 - **Import from existing VPN panels** (wg-easy, 3x-ui)
+- **Advanced Protocol Management** (WireGuard, AmneziaWG, OpenVPN, Shadowsocks, etc.)
+- **AI-powered Protocol Configuration** using OpenRouter (optional)
 - Client configuration management with **expiration dates**
 - **Traffic limits** for clients with automatic enforcement
 - **Server backup and restore** functionality
+- **Scenario Testing**: Define and test different VPN connection scenarios across protocols
+- **Advanced Log Management**: View, search, and manage system and container logs
 - Traffic statistics monitoring
 - QR code generation for mobile apps
 - Multi-language interface (English, Russian, Spanish, German, French, Chinese)
 - REST API with JWT authentication
 - User authentication and access control
 - **Automatic client expiration and traffic limit checks** via cron
+
+## Available Protocols
+
+- AmneziaWG Advanced (`amnezia-wg-advanced`)
+- AmneziaWG 2.0 (`awg2`)
+- WireGuard Standard (`wireguard-standard`)
+- OpenVPN (`openvpn`)
+- Shadowsocks (`shadowsocks`)
+- XRay VLESS (`xray-vless`)
+- MTProxy (Telegram) (`mtproxy`)
+- SMB Server (`smb`)
+- AIVPN (`aivpn`) - https://github.com/infosave2007/aivpn
+
 
 ## Requirements
 
@@ -32,14 +49,49 @@ cp .env.example .env
 docker compose up -d
 docker compose exec web composer install
 
+# Apply migrations (fresh install + updates)
+# 1) bootstrap base schema
+docker compose exec -T db mysql -u"$DB_USERNAME" -p"$DB_PASSWORD" "$DB_DATABASE" < migrations/001_init.sql
+
+# 2) apply the rest (safe to run repeatedly)
+for f in migrations/*.sql; do
+  [ "$(basename "$f")" = "001_init.sql" ] && continue
+  docker compose exec -T db mysql -u"$DB_USERNAME" -p"$DB_PASSWORD" "$DB_DATABASE" < "$f" || true
+done
+
 # Or for older Docker Compose V1
 docker-compose up -d
 docker-compose exec web composer install
+
+docker-compose exec -T db mysql -u"$DB_USERNAME" -p"$DB_PASSWORD" "$DB_DATABASE" < migrations/001_init.sql
+
+for f in migrations/*.sql; do
+  [ "$(basename "$f")" = "001_init.sql" ] && continue
+  docker-compose exec -T db mysql -u"$DB_USERNAME" -p"$DB_PASSWORD" "$DB_DATABASE" < "$f" || true
+done
 ```
 
 Access: http://localhost:8082
 
 Default login: admin@amnez.ia / admin123
+
+### Remote Server Prerequisite
+
+For protocol deployment on a clean remote host, Docker Engine must be available on that host.
+If Docker is missing, install it first (Ubuntu example):
+
+```bash
+apt-get update -y
+apt-get install -y ca-certificates curl gnupg lsb-release
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --batch --yes --dearmor -o /etc/apt/keyrings/docker.gpg
+chmod a+r /etc/apt/keyrings/docker.gpg
+. /etc/os-release
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu ${VERSION_CODENAME} stable" > /etc/apt/sources.list.d/docker.list
+apt-get update -y
+apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+systemctl enable --now docker
+```
 
 ## Configuration
 
@@ -50,7 +102,7 @@ DB_HOST=db
 DB_PORT=3306
 DB_DATABASE=amnezia_panel
 DB_USERNAME=amnezia
-DB_PASSWORD=amnezia123
+DB_PASSWORD=amnezia
 
 ADMIN_EMAIL=admin@amnez.ia
 ADMIN_PASSWORD=admin123
@@ -63,7 +115,10 @@ JWT_SECRET=your-secret-key-change-this
 ### Add VPN Server
 
 1. Servers → Add Server
-2. Enter: name, host IP, SSH port, username, password
+1. Servers → Add Server
+2. Enter: name, host IP, SSH port, username
+3. Choose authentication method: **Password** or **SSH Key**
+   - For SSH Key: Paste your private key (PEM/OpenSSH format)
 3. **(Optional) Enable import from existing panel:**
    - Check "Import from existing panel"
    - Select panel type (wg-easy or 3x-ui)
@@ -140,6 +195,30 @@ curl -X POST http://localhost:8082/api/servers/1/restore \
   -H "Authorization: Bearer <token>" \
   -d '{"backup_id": 123}'
 ```
+
+### Protocol Management
+
+Manage VPN protocols via **Settings → Protocols**:
+- Install/Uninstall protocols (WireGuard, AmneziaWG, OpenVPN, etc.)
+- Configure protocol settings (ports, transport, obfuscation)
+- **AI Assistant**: Use "Ask AI" to generate complex protocol configurations tailored to your needs (requires OpenRouter API key).
+
+### Scenario Testing & Logs
+
+**Scenario Testing**:
+- Create test scenarios to verify connectivity across different protocols and network conditions.
+- Run automated tests to ensure your VPN infrastructure is reliable.
+
+**Log Management**:
+- Centralized view of all system, container, and application logs.
+- Search and filter capabilities to quickly diagnose issues.
+
+### AI Assistant
+
+Configure OpenRouter API key in **Settings** to enable:
+- Auto-translation of the interface
+- AI-assisted protocol configuration
+- Intelligent troubleshooting suggestions
 
 ### Automatic Monitoring and Metrics Collection
 
@@ -222,16 +301,25 @@ DELETE /api/servers/{id}/delete     - Delete server by ID
 GET    /api/servers/{id}/clients    - List clients on server
 ```
 
+### Protocols
+```
+GET    /api/protocols/active        - List all available protocols (JWT-friendly, includes protocol IDs)
+GET    /api/protocols               - Protocol management endpoint (requires session admin auth, not JWT)
+GET    /api/servers/{id}/protocols  - List installed protocols on server
+POST   /api/servers/{id}/protocols/install - Install protocol
+```
+
 ### Clients
 ```
 GET    /api/clients                 - List all clients
 GET    /api/clients/{id}/details    - Get client details with stats, config and QR code
 GET    /api/clients/{id}/qr         - Get client QR code
 POST   /api/clients/create          - Create new client (returns config and QR code)
-       Parameters: server_id, name, expires_in_days (optional)
+       Parameters: server_id, name, protocol_id (optional, default: installed), expires_in_days (optional)
 POST   /api/clients/{id}/revoke     - Revoke client access
 POST   /api/clients/{id}/restore    - Restore client access
-DELETE /api/clients/{id}/delete     - Delete client by ID
+DELETE /api/clients/{id}/delete     - Delete client by ID (removes from DB and server)
+POST   /api/clients/{id}/set-expiration  - Set client expiration date
 POST   /api/clients/{id}/set-expiration  - Set client expiration date
        Parameters: expires_at (Y-m-d H:i:s or null)
 POST   /api/clients/{id}/extend     - Extend client expiration
@@ -284,6 +372,8 @@ inc/                  - Core classes
   JWT.php            - Token auth
   QrUtil.php         - QR code generation
   PanelImporter.php  - Import from wg-easy/3x-ui
+  InstallProtocolManager.php - Protocol management core
+  OpenRouterService.php - AI integration
 templates/           - Twig templates
 migrations/          - SQL migrations (executed in alphabetical order)
 ```

@@ -11,6 +11,7 @@ class Router {
   }
   public static function get(string $pattern, callable $handler): void { self::add('GET', $pattern, $handler); }
   public static function post(string $pattern, callable $handler): void { self::add('POST', $pattern, $handler); }
+  public static function put(string $pattern, callable $handler): void { self::add('PUT', $pattern, $handler); }
   public static function delete(string $pattern, callable $handler): void { self::add('DELETE', $pattern, $handler); }
 
   private static function normalizePattern(string $pattern): string {

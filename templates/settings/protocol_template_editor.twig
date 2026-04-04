@@ -1,0 +1,272 @@
+{% extends "layout.twig" %}
+
+{% block title %}{{ t('protocols.template_editor') }} - {{ parent() }}{% endblock %}
+
+{% block content %}
+<div class="min-h-screen bg-gray-50">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        <!-- Header -->
+        <div class="mb-8">
+            <div class="flex justify-between items-center">
+                <div>
+                    <h1 class="text-3xl font-bold text-gray-900">{{ t('protocols.template_editor') }}</h1>
+                    <p class="mt-2 text-gray-600">{{ t('protocols.template_editor_description') }}</p>
+                </div>
+                <a href="/settings/protocols" class="inline-flex items-center px-4 py-2 border border-gray-300 rounded-md shadow-sm text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500">
+                    <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"/>
+                    </svg>
+                    {{ t('protocols.back_to_protocols') }}
+                </a>
+            </div>
+        </div>
+
+        <!-- Template Editor -->
+        <div class="bg-white shadow rounded-lg">
+            <div class="px-6 py-4 border-b border-gray-200">
+                <h2 class="text-lg font-medium text-gray-900">{{ protocol.name }} - {{ t('protocols.output_template') }}</h2>
+                <p class="mt-1 text-sm text-gray-600">{{ t('protocols.template_editor_help') }}</p>
+            </div>
+            
+            <div class="p-6">
+                <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                    <!-- Template Editor -->
+                    <div>
+                        <div class="flex justify-between items-center mb-3">
+                            <label class="block text-sm font-medium text-gray-700">{{ t('protocols.template_content') }}</label>
+                            <div class="flex space-x-2">
+                                <button id="format-template" class="px-3 py-1 text-xs bg-gray-100 text-gray-700 rounded hover:bg-gray-200">{{ t('common.format') }}</button>
+                                <button id="clear-template" class="px-3 py-1 text-xs bg-red-100 text-red-700 rounded hover:bg-red-200">{{ t('common.clear') }}</button>
+                            </div>
+                        </div>
+                        <textarea id="template-editor" rows="20" class="w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">{{ protocol.output_template }}</textarea>
+                        
+                        <div class="mt-3 flex space-x-2">
+                            <button id="save-template" class="flex-1 inline-flex justify-center items-center px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500">
+                                <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4"/>
+                                </svg>
+                                {{ t('protocols.save_template') }}
+                            </button>
+                            <button id="preview-template" class="flex-1 inline-flex justify-center items-center px-4 py-2 border border-gray-300 rounded-md shadow-sm text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500">
+                                <svg class="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/>
+                                </svg>
+                                {{ t('common.preview') }}
+                            </button>
+                        </div>
+                    </div>
+                    
+                    <!-- Preview Panel -->
+                    <div>
+                        <div class="flex justify-between items-center mb-3">
+                            <label class="block text-sm font-medium text-gray-700">{{ t('common.preview') }}</label>
+                            <button id="refresh-preview" class="px-3 py-1 text-xs bg-green-100 text-green-700 rounded hover:bg-green-200">{{ t('common.refresh') }}</button>
+                        </div>
+                        <div class="bg-gray-900 text-green-400 p-4 rounded-md h-96 overflow-auto">
+                            <pre id="template-preview" class="text-sm whitespace-pre-wrap">{{ t('protocols.click_preview_to_see_output') }}</pre>
+                        </div>
+                        
+                        <div class="mt-3">
+                            <label class="block text-sm font-medium text-gray-700 mb-2">{{ t('protocols.test_variables') }}</label>
+                            <div class="space-y-2">
+                                <input type="text" id="test-private-key" placeholder="{{ t('protocols.private_key') }}" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" value="test_private_key_example_1234567890abcdef">
+                                <input type="text" id="test-client-ip" placeholder="{{ t('protocols.client_ip') }}" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" value="10.8.1.2">
+                                <input type="text" id="test-server-host" placeholder="{{ t('protocols.server_host') }}" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" value="vpn.example.com">
+                                <input type="text" id="test-server-port" placeholder="{{ t('protocols.server_port') }}" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" value="51820">
+                                <input type="text" id="test-preshared-key" placeholder="{{ t('protocols.preshared_key') }}" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" value="test_preshared_key_example">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Template Variables -->
+        <div class="mt-6 bg-white shadow rounded-lg">
+            <div class="px-6 py-4 border-b border-gray-200">
+                <h2 class="text-lg font-medium text-gray-900">{{ t('protocols.template_variables') }}</h2>
+                <p class="mt-1 text-sm text-gray-600">{{ t('protocols.template_variables_help') }}</p>
+            </div>
+            
+            <div class="p-6">
+                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    <div class="variable-card p-3 border border-gray-200 rounded-md">
+                        <div class="flex justify-between items-center">
+                            <code class="text-sm bg-gray-100 px-2 py-1 rounded">{{private_key}}</code>
+                            <button class="copy-variable text-xs text-blue-600 hover:text-blue-800" data-variable="{{private_key}}">{{ t('common.copy') }}</button>
+                        </div>
+                        <p class="mt-2 text-xs text-gray-600">{{ t('protocols.variable_private_key_desc') }}</p>
+                    </div>
+                    
+                    <div class="variable-card p-3 border border-gray-200 rounded-md">
+                        <div class="flex justify-between items-center">
+                            <code class="text-sm bg-gray-100 px-2 py-1 rounded">{{public_key}}</code>
+                            <button class="copy-variable text-xs text-blue-600 hover:text-blue-800" data-variable="{{public_key}}">{{ t('common.copy') }}</button>
+                        </div>
+                        <p class="mt-2 text-xs text-gray-600">{{ t('protocols.variable_public_key_desc') }}</p>
+                    </div>
+                    
+                    <div class="variable-card p-3 border border-gray-200 rounded-md">
+                        <div class="flex justify-between items-center">
+                            <code class="text-sm bg-gray-100 px-2 py-1 rounded">{{client_ip}}</code>
+                            <button class="copy-variable text-xs text-blue-600 hover:text-blue-800" data-variable="{{client_ip}}">{{ t('common.copy') }}</button>
+                        </div>
+                        <p class="mt-2 text-xs text-gray-600">{{ t('protocols.variable_client_ip_desc') }}</p>
+                    </div>
+                    
+                    <div class="variable-card p-3 border border-gray-200 rounded-md">
+                        <div class="flex justify-between items-center">
+                            <code class="text-sm bg-gray-100 px-2 py-1 rounded">{{server_host}}</code>
+                            <button class="copy-variable text-xs text-blue-600 hover:text-blue-800" data-variable="{{server_host}}">{{ t('common.copy') }}</button>
+                        </div>
+                        <p class="mt-2 text-xs text-gray-600">{{ t('protocols.variable_server_host_desc') }}</p>
+                    </div>
+                    
+                    <div class="variable-card p-3 border border-gray-200 rounded-md">
+                        <div class="flex justify-between items-center">
+                            <code class="text-sm bg-gray-100 px-2 py-1 rounded">{{server_port}}</code>
+                            <button class="copy-variable text-xs text-blue-600 hover:text-blue-800" data-variable="{{server_port}}">{{ t('common.copy') }}</button>
+                        </div>
+                        <p class="mt-2 text-xs text-gray-600">{{ t('protocols.variable_server_port_desc') }}</p>
+                    </div>
+                    
+                    <div class="variable-card p-3 border border-gray-200 rounded-md">
+                        <div class="flex justify-between items-center">
+                            <code class="text-sm bg-gray-100 px-2 py-1 rounded">{{preshared_key}}</code>
+                            <button class="copy-variable text-xs text-blue-600 hover:text-blue-800" data-variable="{{preshared_key}}">{{ t('common.copy') }}</button>
+                        </div>
+                        <p class="mt-2 text-xs text-gray-600">{{ t('protocols.variable_preshared_key_desc') }}</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const templateEditor = document.getElementById('template-editor');
+    const templatePreview = document.getElementById('template-preview');
+    const saveTemplateBtn = document.getElementById('save-template');
+    const previewBtn = document.getElementById('preview-template');
+    const refreshBtn = document.getElementById('refresh-preview');
+    const formatBtn = document.getElementById('format-template');
+    const clearBtn = document.getElementById('clear-template');
+    
+    const testPrivateKey = document.getElementById('test-private-key');
+    const testClientIp = document.getElementById('test-client-ip');
+    const testServerHost = document.getElementById('test-server-host');
+    const testServerPort = document.getElementById('test-server-port');
+    const testPresharedKey = document.getElementById('test-preshared-key');
+
+    // Preview template
+    function previewTemplate() {
+        let template = templateEditor.value;
+        
+        // Replace variables with test values
+        template = template.replace(/\{\{private_key\}\}/g, testPrivateKey.value);
+        template = template.replace(/\{\{public_key\}\}/g, 'test_public_key_example');
+        template = template.replace(/\{\{client_ip\}\}/g, testClientIp.value);
+        template = template.replace(/\{\{server_host\}\}/g, testServerHost.value);
+        template = template.replace(/\{\{server_port\}\}/g, testServerPort.value);
+        template = template.replace(/\{\{preshared_key\}\}/g, testPresharedKey.value);
+        
+        templatePreview.textContent = template;
+    }
+
+    previewBtn.addEventListener('click', previewTemplate);
+    refreshBtn.addEventListener('click', previewTemplate);
+    
+    // Auto-preview on input change
+    [testPrivateKey, testClientIp, testServerHost, testServerPort, testPresharedKey].forEach(input => {
+        input.addEventListener('input', function() {
+            if (templatePreview.textContent !== '{{ t('protocols.click_preview_to_see_output') }}') {
+                previewTemplate();
+            }
+        });
+    });
+
+    // Save template
+    saveTemplateBtn.addEventListener('click', function() {
+        const protocolId = {{ protocol.id }};
+        const template = templateEditor.value;
+        
+        fetch(`/api/protocols/${protocolId}`, {
+            method: 'PUT',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                output_template: template
+            })
+        })
+        .then(response => response.json())
+        .then(result => {
+            if (result.success) {
+                alert('{{ t('protocols.template_saved_successfully') }}');
+            } else {
+                alert('{{ t('protocols.error_saving_template') }}: ' + result.error);
+            }
+        })
+        .catch(error => {
+            alert('{{ t('protocols.error_saving_template') }}: ' + error.message);
+        });
+    });
+
+    // Format template (basic formatting)
+    formatBtn.addEventListener('click', function() {
+        let template = templateEditor.value;
+        
+        // Basic formatting for WireGuard configs
+        if (template.includes('[Interface]') || template.includes('[Peer]')) {
+            template = template.replace(/\n\s*/g, '\n');
+            template = template.replace(/\[/g, '\n[');
+            template = template.trim();
+        }
+        
+        templateEditor.value = template;
+        alert('{{ t('protocols.template_formatted') }}');
+    });
+
+    // Clear template
+    clearBtn.addEventListener('click', function() {
+        if (confirm('{{ t('protocols.confirm_clear_template') }}')) {
+            templateEditor.value = '';
+            templatePreview.textContent = '{{ t('protocols.click_preview_to_see_output') }}';
+        }
+    });
+
+    // Copy variables
+    document.querySelectorAll('.copy-variable').forEach(btn => {
+        btn.addEventListener('click', function() {
+            const variable = this.dataset.variable;
+            const textarea = document.createElement('textarea');
+            textarea.value = variable;
+            document.body.appendChild(textarea);
+            textarea.select();
+            document.execCommand('copy');
+            document.body.removeChild(textarea);
+            
+            // Show feedback
+            const originalText = this.textContent;
+            this.textContent = '{{ t('common.copied') }}';
+            setTimeout(() => {
+                this.textContent = originalText;
+            }, 1000);
+        });
+    });
+
+    // Auto-save functionality (optional)
+    let autoSaveTimeout;
+    templateEditor.addEventListener('input', function() {
+        clearTimeout(autoSaveTimeout);
+        autoSaveTimeout = setTimeout(function() {
+            // Could implement auto-save here
+            console.log('Template changed, could auto-save...');
+        }, 2000);
+    });
+});
+</script>
+{% endblock %}
