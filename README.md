@@ -20,6 +20,19 @@ Web-based management panel for Amnezia AWG (WireGuard) VPN servers.
 - User authentication and access control
 - **Automatic client expiration and traffic limit checks** via cron
 
+## Available Protocols
+
+- AmneziaWG Advanced (`amnezia-wg-advanced`)
+- AmneziaWG 2.0 (`awg2`)
+- WireGuard Standard (`wireguard-standard`)
+- OpenVPN (`openvpn`)
+- Shadowsocks (`shadowsocks`)
+- XRay VLESS (`xray-vless`)
+- MTProxy (Telegram) (`mtproxy`)
+- SMB Server (`smb`)
+- AIVPN (`aivpn`) - https://github.com/infosave2007/aivpn
+
+
 ## Requirements
 
 - Docker
