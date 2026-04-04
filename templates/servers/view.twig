@@ -247,7 +247,8 @@
       </div>
     </div>
     {% if clients|length > 0 %}
-    <table class="w-full">
+    <div class="w-full overflow-x-auto">
+    <table class="w-full" style="min-width: 1120px;">
       <thead class="bg-gray-50">
         <tr>
           <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase">{{ t('clients.name') }}</th>
@@ -375,6 +376,7 @@
         {% endfor %}
       </tbody>
     </table>
+    </div>
     {% else %}
     <div class="p-12 text-center text-gray-500">{{ t('clients.no_clients') }}</div>
     {% endif %}
@@ -878,6 +880,39 @@ if (document.getElementById('cpuSparkline')) {
 // Update client speeds
 let clientCharts = {};
 
+function prepareSparklineSeries(values) {
+  const cleaned = values.map(v => {
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  });
+
+  const nonZero = cleaned.filter(v => v > 0).sort((a, b) => a - b);
+  let capped = cleaned;
+
+  // Suppress single extreme spikes that make the mini-chart unreadable.
+  if (nonZero.length >= 5) {
+    const p95Index = Math.floor((nonZero.length - 1) * 0.95);
+    const p95 = nonZero[p95Index] || 0;
+    const cap = p95 > 0 ? p95 * 2 : 0;
+    if (cap > 0) {
+      capped = cleaned.map(v => Math.min(v, cap));
+    }
+  }
+
+  // Small moving average to reduce jitter on tiny sparklines.
+  return capped.map((_, i, arr) => {
+    const from = Math.max(0, i - 1);
+    const to = Math.min(arr.length - 1, i + 1);
+    let sum = 0;
+    let count = 0;
+    for (let j = from; j <= to; j++) {
+      sum += arr[j];
+      count++;
+    }
+    return count > 0 ? sum / count : 0;
+  });
+}
+
 async function updateClientSpeeds() {
   const clientRows = document.querySelectorAll('[id^="client-speed-"]');
   
@@ -899,8 +934,10 @@ async function updateClientSpeeds() {
         // 1. Render/Update Chart
         if (canvas) {
            const labels = metrics.map((_, i) => i);
-           const dataUp = metrics.map(m => (parseFloat(m.speed_up_kbps) / 1000)); // Mbps
-           const dataDown = metrics.map(m => (parseFloat(m.speed_down_kbps) / 1000)); // Mbps
+            const rawUp = metrics.map(m => (parseFloat(m.speed_up_kbps) / 1000)); // Mbps
+            const rawDown = metrics.map(m => (parseFloat(m.speed_down_kbps) / 1000)); // Mbps
+            const dataUp = prepareSparklineSeries(rawUp);
+            const dataDown = prepareSparklineSeries(rawDown);
            
            if (clientCharts[clientId]) {
                // Update existing chart
