@@ -36,9 +36,13 @@ cp .env.example .env
 docker compose up -d
 docker compose exec web composer install
 
+# Ensure all SQL migrations are applied (safe to run repeatedly)
+docker compose exec -T db sh -lc 'for f in /docker-entrypoint-initdb.d/*.sql; do mysql -uroot -p"$MYSQL_ROOT_PASSWORD" "$MYSQL_DATABASE" < "$f" || true; done'
+
 # Or for older Docker Compose V1
 docker-compose up -d
 docker-compose exec web composer install
+docker-compose exec -T db sh -lc 'for f in /docker-entrypoint-initdb.d/*.sql; do mysql -uroot -p"$MYSQL_ROOT_PASSWORD" "$MYSQL_DATABASE" < "$f" || true; done'
 ```
 
 Access: http://localhost:8082
@@ -54,7 +58,7 @@ DB_HOST=db
 DB_PORT=3306
 DB_DATABASE=amnezia_panel
 DB_USERNAME=amnezia
-DB_PASSWORD=amnezia123
+DB_PASSWORD=amnezia
 
 ADMIN_EMAIL=admin@amnez.ia
 ADMIN_PASSWORD=admin123
@@ -255,7 +259,8 @@ GET    /api/servers/{id}/clients    - List clients on server
 
 ### Protocols
 ```
-GET    /api/protocols/active        - List all available protocols (with IDs)
+GET    /api/protocols/active        - List all available protocols (JWT-friendly, includes protocol IDs)
+GET    /api/protocols               - Protocol management endpoint (requires session admin auth, not JWT)
 GET    /api/servers/{id}/protocols  - List installed protocols on server
 POST   /api/servers/{id}/protocols/install - Install protocol
 ```

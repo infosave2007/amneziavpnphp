@@ -2549,6 +2549,14 @@ Router::post('/api/servers/{id}/protocols/install', function ($params) {
         }
 
         $result = InstallProtocolManager::activate($server, $protocol, []);
+
+        // Keep API behavior consistent with UI flow: once protocol activation succeeds,
+        // clear transient error state and mark server as active for client creation.
+        if (is_array($result) && !empty($result['success'])) {
+            $pdo = DB::conn();
+            $stmtUpdate = $pdo->prepare('UPDATE vpn_servers SET status = ?, error_message = NULL WHERE id = ?');
+            $stmtUpdate->execute(['active', $serverId]);
+        }
         echo json_encode($result, JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
     } catch (Exception $e) {
         http_response_code(500);

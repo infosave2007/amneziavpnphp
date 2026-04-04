@@ -18,6 +18,34 @@ Response:
 }
 ```
 
+## Protocols
+
+### List Active Protocols (for JWT API clients)
+```bash
+curl -X GET http://localhost:8082/api/protocols/active \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+Example response:
+```json
+{
+  "success": true,
+  "protocols": [
+    {"id": 11, "slug": "awg2", "name": "AmneziaWG 2.0"},
+    {"id": 13, "slug": "aivpn", "name": "AIVPN"},
+    {"id": 12, "slug": "mtproxy", "name": "MTProxy (Telegram)"}
+  ]
+}
+```
+
+### Install Protocol on Server
+```bash
+curl -X POST http://localhost:8082/api/servers/1/protocols/install \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"protocol_id":11}'
+```
+
 ## Clients
 
 ### Create Client with QR Code

@@ -278,25 +278,46 @@ class InstallProtocolManager
 
         try {
             Logger::appendInstall($serverId, 'Running scripted install...');
+            $metadata = $protocol['definition']['metadata'] ?? [];
             // Choose/ensure VPN UDP port for script-driven installs
             if (($protocol['slug'] ?? '') === 'xray-vless' && (!isset($options['server_port']) || !is_int($options['server_port']) || $options['server_port'] <= 0)) {
                 $options['server_port'] = 443;
             }
             if (!isset($options['server_port']) || !is_int($options['server_port'])) {
-                $options['server_port'] = self::chooseServerPort($server, $protocol['definition']['metadata'] ?? []);
+                $options['server_port'] = self::chooseServerPort($server, $metadata);
             }
             $result = self::runScript($server, $protocol, 'install', $options);
             if (!isset($result['success'])) {
                 $result['success'] = true;
             }
             Logger::appendInstall($serverId, 'Scripted install finished: ' . json_encode($result));
+
+            $rawPort = $result['vpn_port'] ?? null;
+            $resolvedPort = (is_numeric($rawPort) && (int) $rawPort > 0)
+                ? (int) $rawPort
+                : ($options['server_port'] ?? null);
+
+            $awgParams = $result['awg_params'] ?? null;
+            if (!is_array($awgParams)) {
+                $flat = [];
+                foreach (['Jc', 'Jmin', 'Jmax', 'S1', 'S2', 'S3', 'S4', 'H1', 'H2', 'H3', 'H4'] as $k) {
+                    if (array_key_exists($k, $result) && $result[$k] !== '' && $result[$k] !== null) {
+                        $flat[$k] = $result[$k];
+                    }
+                }
+                if (!empty($flat)) {
+                    $awgParams = $flat;
+                }
+            }
+
             $extras = [
-                'vpn_port' => $result['vpn_port'] ?? ($options['server_port'] ?? null),
+                'vpn_port' => $resolvedPort,
                 'server_public_key' => $result['server_public_key'] ?? null,
                 'preshared_key' => $result['preshared_key'] ?? null,
-                'awg_params' => $result['awg_params'] ?? null,
+                'awg_params' => $awgParams,
                 'secret' => $result['secret'] ?? null,
                 'server_host' => $result['server_host'] ?? null,
+                'container_name' => $result['container_name'] ?? ($metadata['container_name'] ?? null),
             ];
             if (($protocol['slug'] ?? '') === 'xray-vless') {
                 foreach (['client_id', 'container_name', 'server_port', 'xray_port', 'reality_public_key', 'reality_private_key', 'reality_short_id', 'reality_server_name'] as $k) {
@@ -563,7 +584,6 @@ class InstallProtocolManager
 
         $context = self::buildContext($server, $protocol, $options);
         $script = self::renderTemplate($scripts, $context);
-        $script = preg_replace('/<<\s*EOF\b/', "<<'EOF'", $script);
         $script = preg_replace('/\n\+\s*/', "\n", $script);
         $exportLines = self::buildExports($context);
         $wrapper = "bash <<'EOS'\nset -euo pipefail\n" . $exportLines . $script . "\nEOS";
@@ -684,6 +704,10 @@ class InstallProtocolManager
         if (isset($extras['preshared_key']) && $extras['preshared_key'] !== null) {
             $setParts[] = 'preshared_key = ?';
             $params[] = (string) $extras['preshared_key'];
+        }
+        if (isset($extras['container_name']) && $extras['container_name'] !== null && $extras['container_name'] !== '') {
+            $setParts[] = 'container_name = ?';
+            $params[] = (string) $extras['container_name'];
         }
         if (array_key_exists('awg_params', $extras)) {
             $awgParams = $extras['awg_params'];

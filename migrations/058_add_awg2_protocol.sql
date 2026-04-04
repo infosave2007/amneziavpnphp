@@ -93,11 +93,11 @@ S1_VAL=50
 S2_VAL=100
 S3_VAL=20
 S4_VAL=10
-# H1-H4: header ranges (string format "x-y" per AWG2 spec)
-H1_VAL="1-4294967295"
-H2_VAL="1-4294967295"
-H3_VAL="1-4294967295"
-H4_VAL="1-4294967295"
+# H1-H4: keep numeric values for broad awg-tools compatibility.
+H1_VAL=123456789
+H2_VAL=223456789
+H3_VAL=323456789
+H4_VAL=423456789
 
 # Write config
 cat > /opt/amnezia/awg2/wg0.conf << EOF
@@ -286,10 +286,10 @@ S1_VAL=50
 S2_VAL=100
 S3_VAL=20
 S4_VAL=10
-H1_VAL="1-4294967295"
-H2_VAL="1-4294967295"
-H3_VAL="1-4294967295"
-H4_VAL="1-4294967295"
+H1_VAL=123456789
+H2_VAL=223456789
+H3_VAL=323456789
+H4_VAL=423456789
 
 cat > /opt/amnezia/awg2/wg0.conf << EOF
 [Interface]
