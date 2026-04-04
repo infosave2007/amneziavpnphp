@@ -1093,6 +1093,10 @@ class InstallProtocolManager
         $metadata = $protocol['definition']['metadata'] ?? [];
         $serverData = $server->getData();
         $containerName = $serverData['container_name'] ?? ($metadata['container_name'] ?? 'amnezia-awg');
+        $configDir = trim((string) ($metadata['config_dir'] ?? ''));
+        if ($configDir === '') {
+            $configDir = (($protocol['slug'] ?? '') === 'awg2') ? '/opt/amnezia/awg2' : '/opt/amnezia/awg';
+        }
         $candidateNames = array_values(array_unique(array_filter([
             is_string($containerName) ? trim($containerName) : '',
             is_string($metadata['container_name'] ?? null) ? trim((string) $metadata['container_name']) : '',
@@ -1111,10 +1115,11 @@ class InstallProtocolManager
                 $server->executeCommand("docker rm -fv {$arg} 2>/dev/null || true", true);
             }
             // Remove known images (best-effort)
-            $server->executeCommand("docker rmi amneziavpn/amnezia-wg amneziavpn/amnezia-awg 2>/dev/null || true", true);
+            $server->executeCommand("docker rmi amneziavpn/amnezia-wg amneziavpn/amnezia-awg amnezia-awg2 2>/dev/null || true", true);
             // Attempt to remove amnezia-dns-net network if present (best-effort)
             $server->executeCommand("docker network rm amnezia-dns-net 2>/dev/null || true", true);
-            // Remove on-disk data for AWG
+            // Remove on-disk data for AWG protocol config to avoid stale restore paths.
+            $server->executeCommand("rm -rf " . escapeshellarg($configDir) . " 2>/dev/null || true", true);
             $server->executeCommand("rm -rf /opt/amnezia/amnezia-awg 2>/dev/null || true", true);
 
             // Clear server deployment metadata in database for this server

@@ -675,17 +675,9 @@ class VpnClient
     private static function generateClientKeys(array $serverData, string $clientName): array
     {
         $containerName = $serverData['container_name'];
-        $token = bin2hex(random_bytes(8));
-
         $cmd = sprintf(
-            "docker exec -i %s sh -c \"umask 077; wg genkey | tee /tmp/%s_priv.key | wg pubkey > /tmp/%s_pub.key; cat /tmp/%s_priv.key; echo '---'; cat /tmp/%s_pub.key; rm -f /tmp/%s_priv.key /tmp/%s_pub.key\"",
-            $containerName,
-            $token,
-            $token,
-            $token,
-            $token,
-            $token,
-            $token
+            "docker exec -i %s sh -lc 'set -e; umask 077; priv=$(wg genkey); pub=$(printf %s \"$priv\" | wg pubkey); printf \"%%s\\n---\\n%%s\\n\" \"$priv\" \"$pub\"'",
+            escapeshellarg($containerName)
         );
 
         $escaped = escapeshellarg($cmd);
@@ -705,9 +697,15 @@ class VpnClient
             throw new Exception("Failed to generate client keys");
         }
 
+        $private = trim((string) $parts[0]);
+        $public = trim((string) $parts[1]);
+        if ($private === '' || $public === '') {
+            throw new Exception('Failed to generate client keys: empty key output');
+        }
+
         return [
-            'private' => trim($parts[0]),
-            'public' => trim($parts[1])
+            'private' => $private,
+            'public' => $public
         ];
     }
 
@@ -984,6 +982,11 @@ class VpnClient
     {
         $containerName = $serverData['container_name'];
         $presharedKey = $serverData['preshared_key'];
+        $publicKey = trim($publicKey);
+
+        if ($publicKey === '') {
+            throw new Exception('Refusing to add client with empty public key');
+        }
 
         // 1. Create temp file for PSK (to avoid shell escaping issues)
         $pskFile = '/tmp/' . bin2hex(random_bytes(8)) . '.psk';

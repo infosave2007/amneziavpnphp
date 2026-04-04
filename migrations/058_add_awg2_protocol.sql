@@ -119,11 +119,6 @@ H3 = $H3_VAL
 H4 = $H4_VAL
 PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -A FORWARD -o %i -j ACCEPT; iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
 PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACCEPT; iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE
-
-[Peer]
-PublicKey = 
-PresharedKey = $PRESHARED_KEY
-AllowedIPs = 10.8.1.2/32
 EOF
 
 echo "$PRIVATE_KEY" > /opt/amnezia/awg2/wireguard_server_private_key.key
@@ -310,11 +305,6 @@ H3 = $H3_VAL
 H4 = $H4_VAL
 PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -A FORWARD -o %i -j ACCEPT; iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
 PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACCEPT; iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE
-
-[Peer]
-PublicKey = 
-PresharedKey = $PRESHARED_KEY
-AllowedIPs = 10.8.1.2/32
 EOF
 
 echo "$PRIVATE_KEY" > /opt/amnezia/awg2/wireguard_server_private_key.key
