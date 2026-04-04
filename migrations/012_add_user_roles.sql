@@ -12,9 +12,39 @@ CREATE TABLE IF NOT EXISTS user_roles (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Add role to users table
-ALTER TABLE users 
-ADD COLUMN role VARCHAR(50) DEFAULT 'viewer' AFTER ldap_dn,
-ADD INDEX idx_role (role);
+SET @role_col_exists := (
+    SELECT COUNT(*)
+    FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'users'
+      AND COLUMN_NAME = 'role'
+);
+
+SET @add_role_col_sql := IF(
+    @role_col_exists = 0,
+    'ALTER TABLE users ADD COLUMN role VARCHAR(50) DEFAULT ''viewer'' AFTER ldap_dn',
+    'SELECT 1'
+);
+PREPARE add_role_col_stmt FROM @add_role_col_sql;
+EXECUTE add_role_col_stmt;
+DEALLOCATE PREPARE add_role_col_stmt;
+
+SET @role_idx_exists := (
+    SELECT COUNT(*)
+    FROM information_schema.STATISTICS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'users'
+      AND INDEX_NAME = 'idx_role'
+);
+
+SET @add_role_idx_sql := IF(
+    @role_idx_exists = 0,
+    'ALTER TABLE users ADD INDEX idx_role (role)',
+    'SELECT 1'
+);
+PREPARE add_role_idx_stmt FROM @add_role_idx_sql;
+EXECUTE add_role_idx_stmt;
+DEALLOCATE PREPARE add_role_idx_stmt;
 
 -- Insert default roles
 INSERT IGNORE INTO user_roles (name, display_name, description, permissions) VALUES

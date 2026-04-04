@@ -49,40 +49,29 @@ cp .env.example .env
 docker compose up -d
 docker compose exec web composer install
 
-# Load DB variables from .env for host-side migration commands
-set -a; source .env; set +a
-
-# Wait until DB is healthy
+# Wait until DB is healthy (initial SQL migration files are applied automatically by MySQL entrypoint)
 until [ "$(docker inspect -f '{{.State.Health.Status}}' amnezia-panel-db 2>/dev/null)" = "healthy" ]; do
   sleep 2
-done
-
-# Apply migrations (fresh install + updates)
-# 1) bootstrap base schema
-docker compose exec -T db mysql -u"$DB_USERNAME" -p"$DB_PASSWORD" "$DB_DATABASE" < migrations/001_init.sql
-
-# 2) apply the rest (safe to run repeatedly)
-for f in migrations/*.sql; do
-  [ "$(basename "$f")" = "001_init.sql" ] && continue
-  docker compose exec -T db mysql -u"$DB_USERNAME" -p"$DB_PASSWORD" "$DB_DATABASE" < "$f" || true
 done
 
 # Or for older Docker Compose V1
 docker-compose up -d
 docker-compose exec web composer install
 
-set -a; source .env; set +a
-
 until [ "$(docker inspect -f '{{.State.Health.Status}}' amnezia-panel-db 2>/dev/null)" = "healthy" ]; do
   sleep 2
 done
 
-docker-compose exec -T db mysql -u"$DB_USERNAME" -p"$DB_PASSWORD" "$DB_DATABASE" < migrations/001_init.sql
-
+# Manual migration mode (existing installations / updates only)
+set -a; source .env; set +a
 for f in migrations/*.sql; do
-  [ "$(basename "$f")" = "001_init.sql" ] && continue
-  docker-compose exec -T db mysql -u"$DB_USERNAME" -p"$DB_PASSWORD" "$DB_DATABASE" < "$f" || true
+  docker compose exec -T db mysql -u"$DB_USERNAME" -p"$DB_PASSWORD" "$DB_DATABASE" < "$f" || true
 done
+
+# For Docker Compose V1 manual migration mode:
+# for f in migrations/*.sql; do
+#   docker-compose exec -T db mysql -u"$DB_USERNAME" -p"$DB_PASSWORD" "$DB_DATABASE" < "$f" || true
+# done
 ```
 
 Access: http://localhost:8082
