@@ -30,7 +30,9 @@ WORKDIR /var/www/html
 COPY . /var/www/html
 
 # Install PHP dependencies
-RUN composer install --no-dev --optimize-autoloader
+RUN git config --global --add safe.directory /var/www/html \
+  && composer config --global audit.block-insecure false \
+  && composer install --no-dev --optimize-autoloader --no-security-blocking
 
 # Configure Apache
 COPY apache.conf /etc/apache2/sites-available/000-default.conf

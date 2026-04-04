@@ -49,6 +49,14 @@ cp .env.example .env
 docker compose up -d
 docker compose exec web composer install
 
+# Load DB variables from .env for host-side migration commands
+set -a; source .env; set +a
+
+# Wait until DB is healthy
+until [ "$(docker inspect -f '{{.State.Health.Status}}' amnezia-panel-db 2>/dev/null)" = "healthy" ]; do
+  sleep 2
+done
+
 # Apply migrations (fresh install + updates)
 # 1) bootstrap base schema
 docker compose exec -T db mysql -u"$DB_USERNAME" -p"$DB_PASSWORD" "$DB_DATABASE" < migrations/001_init.sql
@@ -62,6 +70,12 @@ done
 # Or for older Docker Compose V1
 docker-compose up -d
 docker-compose exec web composer install
+
+set -a; source .env; set +a
+
+until [ "$(docker inspect -f '{{.State.Health.Status}}' amnezia-panel-db 2>/dev/null)" = "healthy" ]; do
+  sleep 2
+done
 
 docker-compose exec -T db mysql -u"$DB_USERNAME" -p"$DB_PASSWORD" "$DB_DATABASE" < migrations/001_init.sql
 
