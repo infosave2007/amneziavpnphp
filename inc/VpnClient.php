@@ -67,16 +67,33 @@ class VpnClient
             $protoRow = $stmtProto2->fetch();
         }
         $slug = $protoRow['slug'] ?? ($serverData['install_protocol'] ?? 'amnezia-wg');
+        $protoMetadata = [];
+        if ($protoRow && !empty($protoRow['definition']) && is_string($protoRow['definition'])) {
+            $decodedDef = json_decode($protoRow['definition'], true);
+            if (is_array($decodedDef)) {
+                $protoMetadata = $decodedDef['metadata'] ?? [];
+            }
+        }
         $isWireguard = in_array($slug, ['amnezia-wg-advanced', 'wireguard-standard', 'amnezia-wg', 'awg2'], true);
 
         // Auto-sync server keys from container EVERY TIME for WireGuard protocols
         // This ensures we always use current container configuration even if it was recreated
         if ($isWireguard) {
             try {
+                // For multi-protocol servers use selected protocol metadata instead of default server row.
+                if (!empty($protoMetadata['container_name']) && is_string($protoMetadata['container_name'])) {
+                    $serverData['container_name'] = trim($protoMetadata['container_name']);
+                }
+                $serverData['install_protocol'] = $slug;
+
                 self::syncServerKeysFromContainer($server, $serverData);
                 // Reload server data after sync (VpnServer caches DB row in-memory)
                 $server->refresh();
                 $serverData = $server->getData();
+                if (!empty($protoMetadata['container_name']) && is_string($protoMetadata['container_name'])) {
+                    $serverData['container_name'] = trim($protoMetadata['container_name']);
+                }
+                $serverData['install_protocol'] = $slug;
             } catch (Exception $e) {
                 error_log('Failed to auto-sync server keys: ' . $e->getMessage());
                 // Continue anyway - might fail later but let's try
@@ -676,7 +693,7 @@ class VpnClient
     {
         $containerName = $serverData['container_name'];
         $cmd = sprintf(
-            "docker exec -i %s sh -lc 'set -e; umask 077; priv=$(wg genkey); pub=$(printf %s \"$priv\" | wg pubkey); printf \"%%s\\n---\\n%%s\\n\" \"$priv\" \"$pub\"'",
+            "docker exec -i %s sh -lc 'set -e; umask 077; priv=\$(wg genkey | tr -d " . '"' . "\\r\\n" . '"' . "); [ -n \"\$priv\" ] || { echo empty_private_key; exit 1; }; pub=\$(printf " . '"' . "%%s\\n" . '"' . " \"\$priv\" | wg pubkey | tr -d " . '"' . "\\r\\n" . '"' . "); [ -n \"\$pub\" ] || { echo empty_public_key; exit 1; }; printf " . '"' . "%%s\\n---\\n%%s\\n" . '"' . " \"\$priv\" \"\$pub\"'",
             escapeshellarg($containerName)
         );
 
@@ -694,7 +711,8 @@ class VpnClient
         $parts = explode("---", trim($out));
 
         if (count($parts) < 2) {
-            throw new Exception("Failed to generate client keys");
+            $head = substr(trim((string) $out), 0, 240);
+            throw new Exception("Failed to generate client keys" . ($head !== '' ? (": " . $head) : ''));
         }
 
         $private = trim((string) $parts[0]);
