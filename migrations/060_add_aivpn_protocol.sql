@@ -85,9 +85,12 @@ if [ "$STATUS" != "running" ]; then
 fi
 
 echo "AIVPN installed successfully"
-echo "Port: $VPN_PORT"
-echo "ExternalIP: $EXTERNAL_IP"
-echo "ConfigDir: $CONFIG_DIR"',
+# Output variables for the web panel parser
+KEY_B64=$(base64 -w 0 "$CONFIG_DIR/server.key" 2>/dev/null || base64 "$CONFIG_DIR/server.key")
+echo "Variable: connection_key=$KEY_B64"
+echo "Variable: server_host=$EXTERNAL_IP"
+echo "Variable: server_port=$VPN_PORT"
+echo "Variable: config_dir=$CONFIG_DIR"',
   '#!/bin/bash
 set -euo pipefail
 
