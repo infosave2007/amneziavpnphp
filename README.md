@@ -36,16 +36,25 @@ cp .env.example .env
 docker compose up -d
 docker compose exec web composer install
 
-# Ensure all SQL migrations are applied (safe to run repeatedly)
+# Apply migrations (fresh install + updates)
+# 1) bootstrap base schema
+docker compose exec -T db mysql -u"$DB_USERNAME" -p"$DB_PASSWORD" "$DB_DATABASE" < migrations/001_init.sql
+
+# 2) apply the rest (safe to run repeatedly)
 for f in migrations/*.sql; do
-  docker compose exec -T db mysql -uroot -p"$MYSQL_ROOT_PASSWORD" "$MYSQL_DATABASE" < "$f" || true
+  [ "$(basename "$f")" = "001_init.sql" ] && continue
+  docker compose exec -T db mysql -u"$DB_USERNAME" -p"$DB_PASSWORD" "$DB_DATABASE" < "$f" || true
 done
 
 # Or for older Docker Compose V1
 docker-compose up -d
 docker-compose exec web composer install
+
+docker-compose exec -T db mysql -u"$DB_USERNAME" -p"$DB_PASSWORD" "$DB_DATABASE" < migrations/001_init.sql
+
 for f in migrations/*.sql; do
-  docker-compose exec -T db mysql -uroot -p"$MYSQL_ROOT_PASSWORD" "$MYSQL_DATABASE" < "$f" || true
+  [ "$(basename "$f")" = "001_init.sql" ] && continue
+  docker-compose exec -T db mysql -u"$DB_USERNAME" -p"$DB_PASSWORD" "$DB_DATABASE" < "$f" || true
 done
 ```
 
