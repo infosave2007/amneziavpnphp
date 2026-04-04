@@ -427,6 +427,7 @@ class VpnServer
      */
     public function executeCommand(string $command, bool $sudo = false): string
     {
+        $baseCommand = $command;
         $escapedCommand = escapeshellarg($command);
 
         // Determine auth method
@@ -448,8 +449,10 @@ class VpnServer
                 $escapedCommand
             );
         } else {
-            if ($sudo && strtolower($this->data['username']) !== 'root') {
-                $command = "echo '{$this->data['password']}' | sudo -S " . $command;
+            $needsSudo = $sudo && strtolower((string) ($this->data['username'] ?? '')) !== 'root';
+            if ($needsSudo) {
+                // Suppress sudo prompt text to keep command output machine-parseable.
+                $command = "echo '{$this->data['password']}' | sudo -S -p '' " . $command;
                 $escapedCommand = escapeshellarg($command);
             }
 
@@ -466,6 +469,26 @@ class VpnServer
         }
 
         $output = shell_exec($sshCommand) ?? '';
+
+        // If sudo auth fails but user can run docker without sudo, retry docker commands directly.
+        if (
+            empty($this->data['ssh_key'])
+            && !empty($needsSudo)
+            && preg_match('/(^|\\n)docker(\\s|$)/', ltrim($baseCommand))
+            && preg_match('/incorrect password attempts|sorry, try again|a password is required/i', $output)
+        ) {
+            $escapedBaseCommand = escapeshellarg($baseCommand);
+            $sshCommandNoSudo = sprintf(
+                "sshpass -p '%s' ssh -p %d %s %s@%s %s 2>&1",
+                $this->data['password'],
+                $this->data['port'],
+                $sshOptions,
+                $this->data['username'],
+                $this->data['host'],
+                $escapedBaseCommand
+            );
+            $output = shell_exec($sshCommandNoSudo) ?? '';
+        }
 
         if ($keyFile && file_exists($keyFile)) {
             unlink($keyFile);

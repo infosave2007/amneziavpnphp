@@ -69,3 +69,7 @@ scripts/test_xray_install.sh
 scripts/test_online.php
 API_AWG_DOCS.md
 log.txt
+scripts/bootstrap_awg_container.sh
+scripts/fix_server_visibility.sh
+scripts/remote_fix_client_create.sh
+scripts/retest_client_api.sh

@@ -741,6 +741,8 @@ class VpnClient
     private static function syncServerKeysFromContainer(VpnServer $server, array $serverData): void
     {
         $containerName = $serverData['container_name'] ?? 'amnezia-awg';
+        $protocolSlug = (string) ($serverData['install_protocol'] ?? '');
+        $primaryConfigDir = $protocolSlug === 'awg2' ? '/opt/amnezia/awg2' : '/opt/amnezia/awg';
 
         try {
             // Try to get public key from wg show
@@ -755,12 +757,17 @@ class VpnClient
             // Prefer that file (stable) and fall back to parsing the first peer PSK from wg0.conf.
             $psk = '';
 
-            $pskKeyFileCmd = "docker exec $containerName sh -c \"cat /opt/amnezia/awg/wireguard_psk.key 2>/dev/null || true\"";
+            $pskKeyFileCmd = "docker exec $containerName sh -c \"cat $primaryConfigDir/wireguard_psk.key 2>/dev/null || cat /opt/amnezia/awg/wireguard_psk.key 2>/dev/null || true\"";
             $psk = trim($server->executeCommand($pskKeyFileCmd, true));
 
             if ($psk === '') {
-                $pskFromConfCmd = "docker exec $containerName sh -c \"grep -E '^[[:space:]]*PresharedKey[[:space:]]*=' /opt/amnezia/awg/wg0.conf 2>/dev/null | head -1 | sed -E 's/^[[:space:]]*PresharedKey[[:space:]]*=[[:space:]]*//' | tr -d '\\r'\" 2>/dev/null || true";
+                $pskFromConfCmd = "docker exec $containerName sh -c \"grep -E '^[[:space:]]*PresharedKey[[:space:]]*=' $primaryConfigDir/wg0.conf 2>/dev/null | head -1 | sed -E 's/^[[:space:]]*PresharedKey[[:space:]]*=[[:space:]]*//' | tr -d '\\r'\" 2>/dev/null || true";
                 $psk = trim($server->executeCommand($pskFromConfCmd, true));
+            }
+
+            if ($psk === '' && $primaryConfigDir !== '/opt/amnezia/awg') {
+                $pskFromAwgConfCmd = "docker exec $containerName sh -c \"grep -E '^[[:space:]]*PresharedKey[[:space:]]*=' /opt/amnezia/awg/wg0.conf 2>/dev/null | head -1 | sed -E 's/^[[:space:]]*PresharedKey[[:space:]]*=[[:space:]]*//' | tr -d '\\r'\" 2>/dev/null || true";
+                $psk = trim($server->executeCommand($pskFromAwgConfCmd, true));
             }
 
             if ($psk === '') {
@@ -769,8 +776,13 @@ class VpnClient
             }
 
             // Extract DNS from config
-            $dnsCmd = "docker exec $containerName sh -c \"grep -E '^DNS' /opt/amnezia/awg/wg0.conf 2>/dev/null | head -1 | cut -d= -f2 | tr -d '[:space:]'\" 2>/dev/null || echo ''";
+            $dnsCmd = "docker exec $containerName sh -c \"grep -E '^DNS' $primaryConfigDir/wg0.conf 2>/dev/null | head -1 | cut -d= -f2 | tr -d '[:space:]'\" 2>/dev/null || echo ''";
             $dns = trim($server->executeCommand($dnsCmd, true));
+
+            if (empty($dns) && $primaryConfigDir !== '/opt/amnezia/awg') {
+                $dnsAwgCmd = "docker exec $containerName sh -c \"grep -E '^DNS' /opt/amnezia/awg/wg0.conf 2>/dev/null | head -1 | cut -d= -f2 | tr -d '[:space:]'\" 2>/dev/null || echo ''";
+                $dns = trim($server->executeCommand($dnsAwgCmd, true));
+            }
 
             if (empty($dns)) {
                 // Try alternative config location
@@ -800,7 +812,10 @@ class VpnClient
 
             // Primary source: wg0.conf
             if (empty($awgParams)) {
-                $awgParams = self::extractAwgParamsFromWg0Conf($server, $containerName, '/opt/amnezia/awg/wg0.conf');
+                $awgParams = self::extractAwgParamsFromWg0Conf($server, $containerName, $primaryConfigDir . '/wg0.conf');
+                if (empty($awgParams) && $primaryConfigDir !== '/opt/amnezia/awg') {
+                    $awgParams = self::extractAwgParamsFromWg0Conf($server, $containerName, '/opt/amnezia/awg/wg0.conf');
+                }
                 if (empty($awgParams)) {
                     $awgParams = self::extractAwgParamsFromWg0Conf($server, $containerName, '/etc/wireguard/wg0.conf');
                 }
@@ -954,21 +969,40 @@ class VpnClient
      */
     private static function executeServerCommand(array $serverData, string $command, bool $sudo = false): string
     {
-        if ($sudo && strtolower($serverData['username']) !== 'root') {
-            $command = "echo '{$serverData['password']}' | sudo -S " . $command;
+        $needsSudo = $sudo && strtolower((string) ($serverData['username'] ?? '')) !== 'root';
+        $baseCommand = $command;
+
+        if ($needsSudo) {
+            // Suppress sudo prompt noise in stdout to keep parser output stable.
+            $command = "echo '{$serverData['password']}' | sudo -S -p '' " . $command;
         }
 
-        $escapedCommand = escapeshellarg($command);
-        $sshCommand = sprintf(
-            "sshpass -p '%s' ssh  -p %d -q -o LogLevel=ERROR -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o PreferredAuthentications=password -o PubkeyAuthentication=no %s@%s %s 2>&1",
-            $serverData['password'],
-            $serverData['port'],
-            $serverData['username'],
-            $serverData['host'],
-            $escapedCommand
-        );
+        $run = static function (string $cmd) use ($serverData): string {
+            $escapedCommand = escapeshellarg($cmd);
+            $sshCommand = sprintf(
+                "sshpass -p '%s' ssh  -p %d -q -o LogLevel=ERROR -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o PreferredAuthentications=password -o PubkeyAuthentication=no %s@%s %s 2>&1",
+                $serverData['password'],
+                $serverData['port'],
+                $serverData['username'],
+                $serverData['host'],
+                $escapedCommand
+            );
 
-        return shell_exec($sshCommand) ?? '';
+            return shell_exec($sshCommand) ?? '';
+        };
+
+        $output = $run($command);
+
+        // If sudo auth fails but docker is available without sudo (docker group), retry without sudo.
+        if (
+            $needsSudo
+            && preg_match('/(^|\\n)docker(\\s|$)/', ltrim($baseCommand))
+            && preg_match('/incorrect password attempts|sorry, try again|a password is required/i', $output)
+        ) {
+            $output = $run($baseCommand);
+        }
+
+        return $output;
     }
 
     /**
