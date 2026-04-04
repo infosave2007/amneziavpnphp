@@ -275,7 +275,7 @@ class ServerMonitoring
         // this->fetchXrayStats() call moved to collectClientMetrics to handle failure gracefully
 
         // Get current stats from server
-        $containerName = $this->serverData['container_name'];
+        $containerName = (string) ($this->serverData['container_name'] ?? '');
         $bytesReceived = 0;
         $bytesSent = 0;
         $speedUp = 0;
@@ -355,6 +355,10 @@ class ServerMonitoring
                 stripos($protocolSlug, 'awg') !== false ||
                 stripos($protocolSlug, 'wireguard') !== false
             );
+
+            if ($isWireguardClient) {
+                $containerName = $this->resolveContainerForProtocol($protocolSlug);
+            }
 
             if ($isAivpnClient) {
                 $aivpn = $this->getAivpnClientStats($client);
@@ -808,6 +812,41 @@ class ServerMonitoring
         }
 
         return '';
+    }
+
+    private function resolveContainerForProtocol(string $protocolSlug): string
+    {
+        $default = trim((string) ($this->serverData['container_name'] ?? ''));
+        if ($protocolSlug === '') {
+            return $default;
+        }
+
+        try {
+            $db = DB::conn();
+            $stmt = $db->prepare('SELECT definition FROM protocols WHERE slug = ? LIMIT 1');
+            $stmt->execute([$protocolSlug]);
+            $definitionJson = $stmt->fetchColumn();
+            if (is_string($definitionJson) && $definitionJson !== '') {
+                $definition = json_decode($definitionJson, true);
+                if (is_array($definition)) {
+                    $candidate = trim((string) ($definition['metadata']['container_name'] ?? ''));
+                    if ($candidate !== '') {
+                        return $candidate;
+                    }
+                }
+            }
+        } catch (Throwable $e) {
+            // Fallback to default container.
+        }
+
+        if ($protocolSlug === 'awg2') {
+            return 'amnezia-awg2';
+        }
+        if (stripos($protocolSlug, 'aivpn') !== false) {
+            return 'aivpn-server';
+        }
+
+        return $default;
     }
 
     /**
