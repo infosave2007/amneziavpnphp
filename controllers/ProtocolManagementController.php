@@ -800,14 +800,43 @@ SH;
             $res['client_id'] = $m[1];
         }
 
+        // Extract secret (for MTProxy and similar protocols)
+        if (preg_match('/Secret:\s*([a-fA-F0-9]+)/i', $output, $m)) {
+            $res['secret'] = $m[1];
+        }
+
+        // Extract server host/IP
+        if (preg_match('/Server\s*Host:\s*(\S+)/i', $output, $m)) {
+            $res['server_host'] = trim($m[1], "'\"");
+        }
+
         // Generic variable extraction (Variable: KEY=VALUE)
-        if (preg_match_all('/Variable:\\s*([a-zA-Z0-9_]+)=(.*)/', $output, $matches, PREG_SET_ORDER)) {
+        if (preg_match_all('/Variable:\s*([a-zA-Z0-9_]+)=(.*)/', $output, $matches, PREG_SET_ORDER)) {
             foreach ($matches as $m) {
                 $key = trim($m[1]);
                 $val = trim($m[2]);
                 // Remove surrounding quotes if present
                 $val = trim($val, "'\"");
                 $res[$key] = $val;
+            }
+        }
+
+        // Fallback: parse any remaining "Key: Value" lines not yet captured
+        // This catches protocol-specific variables like custom fields
+        $lines = preg_split('/\r?\n/', $output);
+        foreach ($lines as $line) {
+            $line = trim($line);
+            if ($line === '') continue;
+            // Skip set -x trace lines (start with +)
+            if (preg_match('/^\+/', $line)) continue;
+            if (preg_match('/^([A-Za-z][A-Za-z0-9 _-]*?)\s*:\s*(.+)$/', $line, $m)) {
+                $rawKey = trim($m[1]);
+                $rawVal = trim($m[2], " \t'\"");
+                $normalized = strtolower(preg_replace('/\s+/', '_', $rawKey));
+                // Don't overwrite already extracted keys
+                if (!array_key_exists($normalized, $res)) {
+                    $res[$normalized] = $rawVal;
+                }
             }
         }
 

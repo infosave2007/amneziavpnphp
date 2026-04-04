@@ -68,3 +68,4 @@ scripts/regen_qr.php
 scripts/test_xray_install.sh
 scripts/test_online.php
 API_AWG_DOCS.md
+log.txt

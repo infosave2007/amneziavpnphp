@@ -67,7 +67,7 @@ class VpnClient
             $protoRow = $stmtProto2->fetch();
         }
         $slug = $protoRow['slug'] ?? ($serverData['install_protocol'] ?? 'amnezia-wg');
-        $isWireguard = in_array($slug, ['amnezia-wg-advanced', 'wireguard-standard', 'amnezia-wg'], true);
+        $isWireguard = in_array($slug, ['amnezia-wg-advanced', 'wireguard-standard', 'amnezia-wg', 'awg2'], true);
 
         // Auto-sync server keys from container EVERY TIME for WireGuard protocols
         // This ensures we always use current container configuration even if it was recreated
@@ -1121,7 +1121,7 @@ class VpnClient
             $stmt = $pdo->prepare('SELECT slug FROM protocols WHERE id = ?');
             $stmt->execute([$protocolId]);
             $slug = (string) $stmt->fetchColumn();
-            return in_array($slug, ['amnezia-wg-advanced', 'wireguard-standard', 'amnezia-wg'], true);
+            return in_array($slug, ['amnezia-wg-advanced', 'wireguard-standard', 'amnezia-wg', 'awg2'], true);
         } catch (Exception $e) {
             return true;
         }
@@ -1309,7 +1309,7 @@ class VpnClient
             $protoRow = $stmt->fetch();
         }
         $slug = $protoRow['slug'] ?? '';
-        $isWireguard = in_array($slug, ['amnezia-wg-advanced', 'wireguard-standard', 'amnezia-wg'], true);
+        $isWireguard = in_array($slug, ['amnezia-wg-advanced', 'wireguard-standard', 'amnezia-wg', 'awg2'], true);
 
         if (!$isWireguard) {
             return ['success' => false, 'error' => 'not_wireguard_protocol', 'protocol_slug' => $slug];
@@ -1335,7 +1335,7 @@ class VpnClient
 
         // If AWG params are missing (common after reinstall), fetch them directly from wg0.conf
         // to avoid falling back to template defaults that will not match the server.
-        if ($slug === 'amnezia-wg-advanced') {
+        if (in_array($slug, ['amnezia-wg-advanced', 'awg2'], true)) {
             $needKeys = ['JC', 'JMIN', 'JMAX', 'S1', 'S2', 'H1', 'H2', 'H3', 'H4'];
             $missing = false;
             foreach ($needKeys as $k) {
@@ -1346,8 +1346,9 @@ class VpnClient
             }
 
             if ($missing) {
-                $containerName = $serverData['container_name'] ?? 'amnezia-awg';
-                $direct = self::extractAwgParamsFromWg0Conf($server, $containerName, '/opt/amnezia/awg/wg0.conf');
+                $containerName = $serverData['container_name'] ?? ($slug === 'awg2' ? 'amnezia-awg2' : 'amnezia-awg');
+                $configDir = $slug === 'awg2' ? '/opt/amnezia/awg2' : '/opt/amnezia/awg';
+                $direct = self::extractAwgParamsFromWg0Conf($server, $containerName, $configDir . '/wg0.conf');
                 if (empty($direct)) {
                     $direct = self::extractAwgParamsFromWg0Conf($server, $containerName, '/etc/wireguard/wg0.conf');
                 }

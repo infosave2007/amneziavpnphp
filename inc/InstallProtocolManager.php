@@ -295,6 +295,8 @@ class InstallProtocolManager
                 'server_public_key' => $result['server_public_key'] ?? null,
                 'preshared_key' => $result['preshared_key'] ?? null,
                 'awg_params' => $result['awg_params'] ?? null,
+                'secret' => $result['secret'] ?? null,
+                'server_host' => $result['server_host'] ?? null,
             ];
             if (($protocol['slug'] ?? '') === 'xray-vless') {
                 foreach (['client_id', 'container_name', 'server_port', 'xray_port', 'reality_public_key', 'reality_private_key', 'reality_short_id', 'reality_server_name'] as $k) {
@@ -653,6 +655,9 @@ class InstallProtocolManager
                     'privatekey' => 'reality_private_key',
                     'shortid' => 'reality_short_id',
                     'servername' => 'reality_server_name',
+                    'secret' => 'secret',
+                    'serverhost' => 'server_host',
+                    'server_host' => 'server_host',
                 ];
 
                 $finalKey = $keyMap[$normalizedKey] ?? $normalizedKey;
@@ -899,7 +904,7 @@ class InstallProtocolManager
      */
     private static function isAwgProtocol(string $slug, array $protocol): bool
     {
-        if (in_array($slug, ['amnezia-wg', 'amnezia-wg-advanced'], true)) {
+        if (in_array($slug, ['amnezia-wg', 'amnezia-wg-advanced', 'awg2'], true)) {
             return true;
         }
         $installScript = (string) ($protocol['install_script'] ?? '');

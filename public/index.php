@@ -1152,7 +1152,7 @@ Router::get('/clients/{id}', function ($params) {
             }
             if ($protocol && ($protocol['output_template'] ?? '') !== '') {
                 $slug = $protocol['slug'] ?? '';
-                $isWireguard = in_array($slug, ['amnezia-wg-advanced', 'wireguard-standard', 'amnezia-wg'], true);
+                $isWireguard = in_array($slug, ['amnezia-wg-advanced', 'wireguard-standard', 'amnezia-wg', 'awg2'], true);
                 if ($isWireguard) {
                     // For WG, we don’t render protocol_output; config is downloadable
                     $protocolOutput = '';
@@ -1771,6 +1771,8 @@ Router::post('/api/servers/create', function () {
             'port' => $port,
             'username' => $username,
             'password' => $password,
+            'install_protocol' => trim($input['install_protocol'] ?? ''),
+            'install_options' => $input['install_options'] ?? null,
         ]);
 
         http_response_code(201);
