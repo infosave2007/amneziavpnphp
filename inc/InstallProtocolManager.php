@@ -747,6 +747,28 @@ class InstallProtocolManager
                     ];
                     $stmt4 = $pdo->prepare('INSERT INTO server_protocols (server_id, protocol_id, config_data, applied_at, created_at) VALUES (?, ?, ?, NOW(), NOW()) ON DUPLICATE KEY UPDATE config_data = VALUES(config_data), applied_at = NOW()');
                     $stmt4->execute([$serverId, (int) $protocolId, json_encode($config)]);
+
+                    // Keep existing MTProxy client links in sync with current runtime port/secret after reinstall.
+                    if ($slug === 'mtproxy') {
+                        $mtHost = (string) ($config['server_host'] ?? '');
+                        $mtPort = (string) ($config['server_port'] ?? '');
+                        $mtSecret = '';
+
+                        if (!empty($extras['secret']) && is_scalar($extras['secret'])) {
+                            $mtSecret = trim((string) $extras['secret']);
+                        }
+                        if ($mtSecret === '' && isset($extras['result']) && is_array($extras['result'])) {
+                            if (!empty($extras['result']['secret']) && is_scalar($extras['result']['secret'])) {
+                                $mtSecret = trim((string) $extras['result']['secret']);
+                            }
+                        }
+
+                        if ($mtHost !== '' && $mtPort !== '' && $mtSecret !== '') {
+                            $mtLink = 'tg://proxy?server=' . $mtHost . '&port=' . $mtPort . '&secret=' . $mtSecret;
+                            $stmtSync = $pdo->prepare('UPDATE vpn_clients SET config = ? WHERE server_id = ? AND protocol_id = ? AND (config IS NULL OR config = "" OR config LIKE "tg://proxy?%")');
+                            $stmtSync->execute([$mtLink, $serverId, (int) $protocolId]);
+                        }
+                    }
                 }
             }
         } catch (Throwable $e) {
