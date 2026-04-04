@@ -1459,10 +1459,19 @@ class VpnClient
             $awgParams = [];
         }
 
+        // Accept mixed-case keys from installer outputs (e.g. Jc/Jmin/Jmax)
+        // by duplicating them into canonical uppercase AWG keys.
+        foreach ($awgParams as $k => $v) {
+            $uk = strtoupper((string) $k);
+            if (in_array($uk, ['JC', 'JMIN', 'JMAX', 'S1', 'S2', 'S3', 'S4', 'H1', 'H2', 'H3', 'H4'], true) && !isset($awgParams[$uk])) {
+                $awgParams[$uk] = $v;
+            }
+        }
+
         // If AWG params are missing (common after reinstall), fetch them directly from wg0.conf
         // to avoid falling back to template defaults that will not match the server.
         if (in_array($slug, ['amnezia-wg-advanced', 'awg2'], true)) {
-            $needKeys = ['JC', 'JMIN', 'JMAX', 'S1', 'S2', 'S3', 'S4', 'H1', 'H2', 'H3', 'H4'];
+            $needKeys = ['JC', 'JMIN', 'JMAX', 'S1', 'S2', 'H1', 'H2', 'H3', 'H4'];
             $missing = false;
             foreach ($needKeys as $k) {
                 if (!isset($awgParams[$k])) {
@@ -1492,6 +1501,13 @@ class VpnClient
                         error_log('Failed to persist AWG params during regeneration: ' . $e->getMessage());
                     }
                 }
+            }
+
+            if (!isset($awgParams['S3'])) {
+                $awgParams['S3'] = 0;
+            }
+            if (!isset($awgParams['S4'])) {
+                $awgParams['S4'] = 0;
             }
 
             // Still missing? Refuse to overwrite config with template defaults.

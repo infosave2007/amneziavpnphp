@@ -1149,7 +1149,7 @@ class InstallProtocolManager
 
             if ($isAwg) {
                 $detection = self::detectBuiltinAwg($server, $protocol);
-                if (in_array($detection['status'] ?? '', ['existing', 'partial'], true)) {
+                if (($detection['status'] ?? '') === 'existing') {
                     Logger::appendInstall($serverId, 'Existing AWG installation detected, restoring instead of reinstalling');
                     $restoreResult = self::restoreBuiltinAwg($server, $protocol, $detection, $options);
                     // Import existing clients into DB
@@ -1177,7 +1177,7 @@ class InstallProtocolManager
 
             if ($isXray) {
                 $xrayDetection = self::detectBuiltinXray($server, $protocol);
-                if (in_array($xrayDetection['status'] ?? '', ['existing', 'partial'], true)) {
+                if (($xrayDetection['status'] ?? '') === 'existing') {
                     Logger::appendInstall($serverId, 'Existing X-Ray installation detected, restoring instead of reinstalling');
                     $restoreResult = self::restoreBuiltinXray($server, $protocol, $xrayDetection, $options);
                     return array_merge($restoreResult, ['mode' => 'restore_existing']);
@@ -1189,12 +1189,41 @@ class InstallProtocolManager
             if ($engine === 'builtin_awg') {
                 $res = $server->runAwgInstall($options);
                 Logger::appendInstall($serverId, 'Builtin AWG install finished');
+
+                $resolvedPort = null;
+                if (isset($res['vpn_port']) && (int) $res['vpn_port'] > 0) {
+                    $resolvedPort = (int) $res['vpn_port'];
+                } elseif (isset($res['server_port']) && (int) $res['server_port'] > 0) {
+                    $resolvedPort = (int) $res['server_port'];
+                }
+
+                $resolvedAwgParams = $res['awg_params'] ?? null;
+                if (!is_array($resolvedAwgParams)) {
+                    $candidate = [];
+                    foreach (['Jc', 'Jmin', 'Jmax', 'S1', 'S2', 'H1', 'H2', 'H3', 'H4'] as $k) {
+                        if (array_key_exists($k, $res)) {
+                            $candidate[$k] = $res[$k];
+                        }
+                    }
+                    if ($candidate) {
+                        $resolvedAwgParams = $candidate;
+                    }
+                }
+
+                self::markServerActive($serverId, null, [
+                    'vpn_port' => $resolvedPort,
+                    'server_public_key' => $res['server_public_key'] ?? null,
+                    'preshared_key' => $res['preshared_key'] ?? null,
+                    'container_name' => $res['container_name'] ?? null,
+                    'awg_params' => $resolvedAwgParams,
+                ]);
+
                 $pdo = DB::conn();
                 $pid = self::resolveProtocolId($protocol);
                 if ($pid) {
                     $config = [
                         'server_host' => $server->getData()['host'] ?? null,
-                        'server_port' => $res['vpn_port'] ?? null,
+                        'server_port' => $resolvedPort,
                         'extras' => $res
                     ];
                     $stmt2 = $pdo->prepare('INSERT INTO server_protocols (server_id, protocol_id, config_data, applied_at, created_at) VALUES (?, ?, ?, NOW(), NOW()) ON DUPLICATE KEY UPDATE config_data = VALUES(config_data), applied_at = NOW()');

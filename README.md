@@ -37,17 +37,39 @@ docker compose up -d
 docker compose exec web composer install
 
 # Ensure all SQL migrations are applied (safe to run repeatedly)
-docker compose exec -T db sh -lc 'for f in /docker-entrypoint-initdb.d/*.sql; do mysql -uroot -p"$MYSQL_ROOT_PASSWORD" "$MYSQL_DATABASE" < "$f" || true; done'
+for f in migrations/*.sql; do
+  docker compose exec -T db mysql -uroot -p"$MYSQL_ROOT_PASSWORD" "$MYSQL_DATABASE" < "$f" || true
+done
 
 # Or for older Docker Compose V1
 docker-compose up -d
 docker-compose exec web composer install
-docker-compose exec -T db sh -lc 'for f in /docker-entrypoint-initdb.d/*.sql; do mysql -uroot -p"$MYSQL_ROOT_PASSWORD" "$MYSQL_DATABASE" < "$f" || true; done'
+for f in migrations/*.sql; do
+  docker-compose exec -T db mysql -uroot -p"$MYSQL_ROOT_PASSWORD" "$MYSQL_DATABASE" < "$f" || true
+done
 ```
 
 Access: http://localhost:8082
 
 Default login: admin@amnez.ia / admin123
+
+### Remote Server Prerequisite
+
+For protocol deployment on a clean remote host, Docker Engine must be available on that host.
+If Docker is missing, install it first (Ubuntu example):
+
+```bash
+apt-get update -y
+apt-get install -y ca-certificates curl gnupg lsb-release
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --batch --yes --dearmor -o /etc/apt/keyrings/docker.gpg
+chmod a+r /etc/apt/keyrings/docker.gpg
+. /etc/os-release
+echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu ${VERSION_CODENAME} stable" > /etc/apt/sources.list.d/docker.list
+apt-get update -y
+apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+systemctl enable --now docker
+```
 
 ## Configuration
 
