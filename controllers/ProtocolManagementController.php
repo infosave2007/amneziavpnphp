@@ -532,9 +532,9 @@ SH;
             $rm = $this->runHostCommandChecked('docker rm -f ' . escapeshellarg($container) . ' >/dev/null 2>&1 || true');
             $send(['type' => 'cmd_done', 'rc' => $rm['rc']]);
 
-            $cmdRun = 'docker run --privileged -d --name ' . $container . ' ubuntu:22.04 sleep infinity';
+            $cmdRun = 'docker run --network host --privileged -d --name ' . $container . ' ubuntu:22.04 sleep infinity';
             $send(['type' => 'cmd', 'cmd' => $cmdRun]);
-            $run = $this->runHostCommandChecked('docker run --privileged -d -v /var/run/docker.sock:/var/run/docker.sock --name ' . escapeshellarg($container) . ' ubuntu:22.04 sleep infinity');
+            $run = $this->runHostCommandChecked('docker run --network host --privileged -d -v /var/run/docker.sock:/var/run/docker.sock --name ' . escapeshellarg($container) . ' ubuntu:22.04 sleep infinity');
             if ($run['rc'] !== 0) {
                 $send(['type' => 'error', 'error' => 'Docker not accessible: ' . trim($run['out'])]);
                 return;

@@ -57,7 +57,7 @@ services:
     restart: unless-stopped
     environment:
       DOCKER_TLS_CERTDIR: ""
-
+    command: ["dockerd", "--host=tcp://0.0.0.0:2375", "--host=unix:///var/run/docker.sock", "--tls=false", "--dns=8.8.8.8", "--dns=1.1.1.1", "--mtu=1200"]
     volumes:
       - dind_data:/var/lib/docker
 
