@@ -155,7 +155,7 @@
   {% if protocol_output and client.show_text_content %}
   <div class="bg-white rounded shadow p-6 mt-6">
     <h3 class="font-bold mb-4">{{ t('clients.connection_instructions') }}</h3>
-    <pre class="mb-0" style="white-space: pre-wrap;">{{ protocol_output }}</pre>
+    <pre class="mb-0" style="white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word;">{{ protocol_output }}</pre>
   </div>
   {% endif %}
 </div>

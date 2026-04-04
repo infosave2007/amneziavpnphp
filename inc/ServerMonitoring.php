@@ -16,6 +16,8 @@ class ServerMonitoring
     private array $serverData;
     private array $xrayStatsCache = [];
     private bool $xrayStatsFetched = false;
+    private array $aivpnStatsCache = ['by_name' => [], 'by_id' => [], 'by_ip' => []];
+    private bool $aivpnStatsFetched = false;
 
     /**
      * Fetch all X-ray user stats in one batch
@@ -113,10 +115,20 @@ class ServerMonitoring
             }
         }
 
-        // Pre-fetch X-ray stats
-        if (!$this->fetchXrayStats()) {
-            error_log("Failed to fetch X-ray stats, preventing DB overwrite");
-            return []; // Abort if stats collection failed
+        // Pre-fetch X-ray stats only for Xray servers.
+        // Otherwise we block AWG/WireGuard stats collection with irrelevant Xray errors.
+        if ($this->isXrayServer()) {
+            if (!$this->fetchXrayStats()) {
+                error_log("Failed to fetch X-ray stats, preventing DB overwrite");
+                return []; // Abort only for Xray servers
+            }
+        }
+
+        // For AIVPN we best-effort fetch client stats once per cycle.
+        if ($this->isAivpnServer()) {
+            if (!$this->fetchAivpnStats()) {
+                error_log("Failed to fetch AIVPN stats, using DB fallback values");
+            }
         }
 
         $clients = VpnClient::listByServer($this->serverData['id']);
@@ -271,12 +283,16 @@ class ServerMonitoring
 
         // Determine if this client is XRay based on protocol_id
         $isXrayClient = false;
+        $protocolSlug = '';
         if (!empty($client['protocol_id'])) {
             $stmtProto = $db->prepare('SELECT slug FROM protocols WHERE id = ?');
             $stmtProto->execute([$client['protocol_id']]);
             $protoData = $stmtProto->fetch();
-            if ($protoData && stripos($protoData['slug'], 'xray') !== false) {
-                $isXrayClient = true;
+            if ($protoData) {
+                $protocolSlug = (string) ($protoData['slug'] ?? '');
+                if (stripos($protocolSlug, 'xray') !== false) {
+                    $isXrayClient = true;
+                }
             }
         }
         
@@ -284,6 +300,11 @@ class ServerMonitoring
         if (!$isXrayClient && !empty($client['config']) && strpos($client['config'], 'vless://') !== false) {
             $isXrayClient = true;
         }
+
+        $isAivpnClient = (
+            stripos($protocolSlug, 'aivpn') !== false ||
+            (!empty($client['config']) && strpos((string) $client['config'], 'aivpn://') === 0)
+        );
 
         if ($isXrayClient) {
             // Retrieve DELTA from cache
@@ -330,6 +351,70 @@ class ServerMonitoring
         } else {
             // WireGuard Logic - get bytes and handshake timestamp
             $publicKey = $client['public_key'];
+            $isWireguardClient = (
+                stripos($protocolSlug, 'awg') !== false ||
+                stripos($protocolSlug, 'wireguard') !== false
+            );
+
+            if ($isAivpnClient) {
+                $aivpn = $this->getAivpnClientStats($client);
+                if (is_array($aivpn)) {
+                    $stmt = $db->prepare("SELECT bytes_sent, bytes_received, aivpn_raw_bytes_in, aivpn_raw_bytes_out, aivpn_offset_bytes_in, aivpn_offset_bytes_out FROM vpn_clients WHERE id = ?");
+                    $stmt->execute([$client['id']]);
+                    $currentDbStats = $stmt->fetch(PDO::FETCH_ASSOC);
+
+                    $prevSent = (int) ($currentDbStats['bytes_sent'] ?? 0);
+                    $prevReceived = (int) ($currentDbStats['bytes_received'] ?? 0);
+                    $rawInPrev = (int) ($currentDbStats['aivpn_raw_bytes_in'] ?? 0);
+                    $rawOutPrev = (int) ($currentDbStats['aivpn_raw_bytes_out'] ?? 0);
+                    $offsetIn = (int) ($currentDbStats['aivpn_offset_bytes_in'] ?? 0);
+                    $offsetOut = (int) ($currentDbStats['aivpn_offset_bytes_out'] ?? 0);
+
+                    $rawInNow = (int) ($aivpn['bytes_in'] ?? 0);
+                    $rawOutNow = (int) ($aivpn['bytes_out'] ?? 0);
+
+                    // Detect counter rollover/reset in AIVPN source and preserve cumulative totals.
+                    if ($rawInNow < $rawInPrev) {
+                        $offsetIn = max($offsetIn + $rawInPrev, $prevSent);
+                    }
+                    if ($rawOutNow < $rawOutPrev) {
+                        $offsetOut = max($offsetOut + $rawOutPrev, $prevReceived);
+                    }
+
+                    $candidateSent = $offsetIn + $rawInNow;
+                    $candidateReceived = $offsetOut + $rawOutNow;
+
+                    // AIVPN stores per-client counters as bytes_in/bytes_out.
+                    // Map to panel semantics: sent=client upload, received=client download.
+                    $bytesSent = max($prevSent, $candidateSent);
+                    $bytesReceived = max($prevReceived, $candidateReceived);
+
+                    $stmtAivpn = $db->prepare("UPDATE vpn_clients SET aivpn_raw_bytes_in = ?, aivpn_raw_bytes_out = ?, aivpn_offset_bytes_in = ?, aivpn_offset_bytes_out = ? WHERE id = ?");
+                    $stmtAivpn->execute([$rawInNow, $rawOutNow, $offsetIn, $offsetOut, $client['id']]);
+
+                    $lastHandshake = $aivpn['last_handshake'] ?? null;
+                    if (is_string($lastHandshake) && $lastHandshake !== '') {
+                        $ts = strtotime($lastHandshake);
+                        if ($ts) {
+                            $stmtHs = $db->prepare("UPDATE vpn_clients SET last_handshake = ? WHERE id = ?");
+                            $stmtHs->execute([date('Y-m-d H:i:s', $ts), $client['id']]);
+                        }
+                    }
+                } else {
+                    $stmt = $db->prepare("SELECT bytes_sent, bytes_received FROM vpn_clients WHERE id = ?");
+                    $stmt->execute([$client['id']]);
+                    $currentDbStats = $stmt->fetch(PDO::FETCH_ASSOC);
+                    $bytesSent = (int) ($currentDbStats['bytes_sent'] ?? 0);
+                    $bytesReceived = (int) ($currentDbStats['bytes_received'] ?? 0);
+                }
+            } elseif (empty($publicKey) || !$isWireguardClient) {
+                // Non-WireGuard protocols without dedicated collectors keep DB values.
+                $stmt = $db->prepare("SELECT bytes_sent, bytes_received FROM vpn_clients WHERE id = ?");
+                $stmt->execute([$client['id']]);
+                $currentDbStats = $stmt->fetch(PDO::FETCH_ASSOC);
+                $bytesSent = (int) ($currentDbStats['bytes_sent'] ?? 0);
+                $bytesReceived = (int) ($currentDbStats['bytes_received'] ?? 0);
+            } else {
             // wg show all dump format (tab-separated):
             // $1=interface $2=pubkey $3=psk $4=endpoint $5=allowed-ips $6=latest-handshake $7=rx-bytes $8=tx-bytes $9=keepalive
             // rx-bytes = bytes received by server = client's upload (bytes_sent)
@@ -351,6 +436,7 @@ class ServerMonitoring
                         $stmtHs->execute([$handshakeDate, $client['id']]);
                     }
                 }
+            }
             }
         }
 
@@ -588,6 +674,140 @@ class ServerMonitoring
     private function isXrayServer(): bool
     {
         return $this->getXrayContainerName() !== null;
+    }
+
+    /**
+     * Check if this server is an AIVPN server.
+     */
+    private function isAivpnServer(): bool
+    {
+        $containerName = (string) ($this->serverData['container_name'] ?? '');
+        $protocol = (string) ($this->serverData['install_protocol'] ?? '');
+        return stripos($containerName, 'aivpn') !== false || stripos($protocol, 'aivpn') !== false;
+    }
+
+    /**
+     * Fetch AIVPN clients and their stats once per collection cycle.
+     */
+    private function fetchAivpnStats(): bool
+    {
+        if ($this->aivpnStatsFetched) {
+            return true;
+        }
+
+        $this->aivpnStatsFetched = true;
+        $this->aivpnStatsCache = ['by_name' => [], 'by_id' => [], 'by_ip' => []];
+
+        $containerName = trim((string) ($this->serverData['container_name'] ?? ''));
+        if ($containerName === '' || stripos($containerName, 'aivpn') === false) {
+            $containerName = 'aivpn-server';
+        }
+
+        $jsonRaw = $this->execSSH(
+            'docker exec -i ' . escapeshellarg($containerName) . ' cat /etc/aivpn/clients.json 2>/dev/null'
+        );
+
+        if (!$jsonRaw || trim($jsonRaw) === '') {
+            return false;
+        }
+
+        $data = json_decode($jsonRaw, true);
+        if (!is_array($data) || !isset($data['clients']) || !is_array($data['clients'])) {
+            return false;
+        }
+
+        foreach ($data['clients'] as $entry) {
+            if (!is_array($entry)) {
+                continue;
+            }
+
+            $stats = is_array($entry['stats'] ?? null) ? $entry['stats'] : [];
+            $record = [
+                'id' => (string) ($entry['id'] ?? ''),
+                'name' => (string) ($entry['name'] ?? ''),
+                'vpn_ip' => (string) ($entry['vpn_ip'] ?? ''),
+                'bytes_in' => (int) ($stats['bytes_in'] ?? 0),
+                'bytes_out' => (int) ($stats['bytes_out'] ?? 0),
+                'last_handshake' => isset($stats['last_handshake']) ? (string) $stats['last_handshake'] : null,
+            ];
+
+            if ($record['name'] !== '') {
+                $this->aivpnStatsCache['by_name'][strtolower($record['name'])] = $record;
+            }
+            if ($record['id'] !== '') {
+                $this->aivpnStatsCache['by_id'][$record['id']] = $record;
+            }
+            if ($record['vpn_ip'] !== '') {
+                $this->aivpnStatsCache['by_ip'][$record['vpn_ip']] = $record;
+            }
+        }
+
+        return true;
+    }
+
+    private function getAivpnClientStats(array $client): ?array
+    {
+        if (!$this->aivpnStatsFetched && !$this->fetchAivpnStats()) {
+            return null;
+        }
+
+        $name = trim((string) ($client['name'] ?? ''));
+        if ($name !== '') {
+            $nameKey = strtolower($name);
+            if (isset($this->aivpnStatsCache['by_name'][$nameKey])) {
+                return $this->aivpnStatsCache['by_name'][$nameKey];
+            }
+        }
+
+        $clientIp = trim((string) ($client['client_ip'] ?? ''));
+        if ($clientIp !== '' && isset($this->aivpnStatsCache['by_ip'][$clientIp])) {
+            return $this->aivpnStatsCache['by_ip'][$clientIp];
+        }
+
+        $cfgIp = $this->extractAivpnIpFromConfig((string) ($client['config'] ?? ''));
+        if ($cfgIp !== '' && isset($this->aivpnStatsCache['by_ip'][$cfgIp])) {
+            return $this->aivpnStatsCache['by_ip'][$cfgIp];
+        }
+
+        return null;
+    }
+
+    private function extractAivpnIpFromConfig(string $config): string
+    {
+        if (stripos($config, 'aivpn://') !== 0) {
+            return '';
+        }
+
+        $payload = substr($config, strlen('aivpn://'));
+        if ($payload === '') {
+            return '';
+        }
+
+        $decoded = base64_decode(strtr($payload, '-_', '+/'), true);
+        if ($decoded === false) {
+            $padLen = strlen($payload) % 4;
+            $normalized = $payload;
+            if ($padLen > 0) {
+                $normalized .= str_repeat('=', 4 - $padLen);
+            }
+            $decoded = base64_decode(strtr($normalized, '-_', '+/'), true);
+        }
+
+        if ($decoded === false) {
+            return '';
+        }
+
+        $data = json_decode($decoded, true);
+        if (!is_array($data)) {
+            return '';
+        }
+
+        $ip = trim((string) ($data['i'] ?? ''));
+        if ($ip !== '' && preg_match('/^\d{1,3}(?:\.\d{1,3}){3}$/', $ip)) {
+            return $ip;
+        }
+
+        return '';
     }
 
     /**

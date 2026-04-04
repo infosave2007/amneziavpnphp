@@ -126,7 +126,7 @@ class VpnClient
             }
 
             // Add AWG parameters (use UPPERCASE keys internal logic)
-            foreach (['JC', 'JMIN', 'JMAX', 'S1', 'S2', 'H1', 'H2', 'H3', 'H4'] as $key) {
+            foreach (['JC', 'JMIN', 'JMAX', 'S1', 'S2', 'S3', 'S4', 'H1', 'H2', 'H3', 'H4'] as $key) {
                 if (isset($cleanAwgParams[$key])) {
                     $vars[$key] = $cleanAwgParams[$key];
                 } else {
@@ -137,6 +137,8 @@ class VpnClient
                         'JMAX' => 200,
                         'S1' => 50,
                         'S2' => 100,
+                        'S3' => 20,
+                        'S4' => 10,
                         'H1' => 1,
                         'H2' => 2,
                         'H3' => 3,
@@ -213,7 +215,7 @@ class VpnClient
                 foreach ($extras as $k => $v) {
                     if (is_scalar($v)) {
                         // Preserve uppercase for AWG obfuscation parameters
-                        if (in_array($k, ['Jc', 'Jmin', 'Jmax', 'S1', 'S2', 'H1', 'H2', 'H3', 'H4'], true)) {
+                        if (in_array($k, ['Jc', 'Jmin', 'Jmax', 'S1', 'S2', 'S3', 'S4', 'H1', 'H2', 'H3', 'H4'], true)) {
                             $vars[$k] = (string) $v;
                         } else {
                             $vars[strtolower($k)] = (string) $v;
@@ -379,6 +381,10 @@ class VpnClient
                     }
                 }
             }
+            if ($slug === 'aivpn') {
+                // Canonical connection key should come from AIVPN --add-client output.
+                // We keep fallback generation later only if add_client flow didn't provide a key.
+            }
             $pass = null;
             $pwdCmd = isset($protoRow['password_command']) ? trim((string) $protoRow['password_command']) : '';
             if ($pwdCmd !== '') {
@@ -418,11 +424,57 @@ class VpnClient
                 // For xray-vless it uses builtin fallback in runScript.
                 try {
                     require_once __DIR__ . '/InstallProtocolManager.php';
-                    InstallProtocolManager::addClient($server, $protoRow, $vars);
+                    $addClientResult = InstallProtocolManager::addClient($server, $protoRow, $vars);
+                    if (is_array($addClientResult)) {
+                        foreach ($addClientResult as $rk => $rv) {
+                            if (!is_scalar($rv)) {
+                                continue;
+                            }
+                            $key = (string) $rk;
+                            $value = trim((string) $rv);
+                            if ($value === '') {
+                                continue;
+                            }
+                            $vars[$key] = $value;
+                            $vars[strtolower($key)] = $value;
+                        }
+
+                        if ($slug === 'aivpn') {
+                            if (empty($vars['connection_key']) && !empty($vars['connection_uri']) && stripos((string) $vars['connection_uri'], 'aivpn://') === 0) {
+                                $vars['connection_key'] = substr((string) $vars['connection_uri'], strlen('aivpn://'));
+                            }
+                            if (!empty($vars['client_ip']) && preg_match('/^\d{1,3}(?:\.\d{1,3}){3}$/', (string) $vars['client_ip'])) {
+                                $clientIP = (string) $vars['client_ip'];
+                                $vars['client_ip'] = $clientIP;
+                            }
+                        }
+                    }
                 } catch (Exception $e) {
                     error_log("Failed to add client to server: " . $e->getMessage());
                     throw $e;
                 }
+            }
+
+            if ($slug === 'aivpn' && empty($vars['connection_key'])) {
+                try {
+                    $rawKey = trim((string) $server->executeCommand('cat /etc/aivpn/server.key 2>/dev/null', true));
+                    if ($rawKey !== '' && !empty($vars['client_ip']) && !empty($vars['server_host']) && !empty($vars['server_port'])) {
+                        $payload = [
+                            'i' => (string) $vars['client_ip'],
+                            'k' => $rawKey,
+                            'p' => '',
+                            's' => (string) $vars['server_host'] . ':' . (string) $vars['server_port'],
+                        ];
+                        $json = (string) json_encode($payload, JSON_UNESCAPED_SLASHES);
+                        $vars['connection_key'] = rtrim(strtr(base64_encode($json), '+/', '-_'), '=');
+                    }
+                } catch (Exception $e) {
+                    // Keep empty: final template output will expose a missing key.
+                }
+            }
+
+            if ($slug === 'aivpn' && !empty($vars['connection_key'])) {
+                $vars['connection_key'] = self::normalizeAivpnConnectionKey((string) $vars['connection_key']);
             }
 
             $config = $protoRow ? ProtocolService::generateProtocolOutput($protoRow, $vars) : '';
@@ -465,6 +517,46 @@ class VpnClient
         ]);
 
         return (int) $pdo->lastInsertId();
+    }
+
+    private static function normalizeAivpnConnectionKey(string $key): string
+    {
+        $key = trim($key);
+        if ($key === '') {
+            return $key;
+        }
+
+        $decoded = base64_decode(strtr($key, '-_', '+/'), true);
+        if ($decoded === false) {
+            $padLen = strlen($key) % 4;
+            $normalized = $key;
+            if ($padLen > 0) {
+                $normalized .= str_repeat('=', 4 - $padLen);
+            }
+            $decoded = base64_decode(strtr($normalized, '-_', '+/'), true);
+        }
+
+        if ($decoded === false) {
+            return $key;
+        }
+
+        $data = json_decode($decoded, true);
+        if (!is_array($data) || empty($data['s']) || !is_string($data['s'])) {
+            return $key;
+        }
+
+        $endpoint = trim($data['s']);
+        $endpoint = preg_replace('#^https?://#i', '', $endpoint);
+        $endpoint = preg_replace('#/.*$#', '', $endpoint ?? '');
+
+        if ($endpoint !== '' && preg_match('/^(.+?)(?::\d+){2,}$/', $endpoint, $m) && preg_match('/:(\d+)$/', $endpoint, $pm)) {
+            $endpoint = trim((string) $m[1]) . ':' . (string) $pm[1];
+            $data['s'] = $endpoint;
+            $json = (string) json_encode($data, JSON_UNESCAPED_SLASHES);
+            return rtrim(strtr(base64_encode($json), '+/', '-_'), '=');
+        }
+
+        return $key;
     }
 
     public static function listByServerAndProtocol(int $serverId, int $protocolId): array
@@ -681,7 +773,7 @@ class VpnClient
         $awgParams = [];
 
         $awgLinesCmd = sprintf(
-            "docker exec %s sh -c \"grep -E '^[[:space:]]*(Jc|Jmin|Jmax|S1|S2|H1|H2|H3|H4)[[:space:]]*=' %s 2>/dev/null || true\"",
+            "docker exec %s sh -c \"grep -E '^[[:space:]]*(Jc|Jmin|Jmax|S1|S2|S3|S4|H1|H2|H3|H4)[[:space:]]*=' %s 2>/dev/null || true\"",
             escapeshellarg($containerName),
             escapeshellarg($confPath)
         );
@@ -692,7 +784,7 @@ class VpnClient
             if ($line === '') {
                 continue;
             }
-            if (preg_match('/^(Jc|Jmin|Jmax|S1|S2|H1|H2|H3|H4)\s*=\s*(\d+)\s*$/i', $line, $m)) {
+            if (preg_match('/^(Jc|Jmin|Jmax|S1|S2|S3|S4|H1|H2|H3|H4)\s*=\s*(\d+)\s*$/i', $line, $m)) {
                 $k = strtoupper($m[1]);
                 $awgParams[$k] = (int) $m[2];
             }
@@ -803,7 +895,7 @@ class VpnClient
             // Legacy attempt: some builds print jc/jmin/... in `wg show` output.
             $wgShowCmd = "docker exec $containerName wg show wg0 2>/dev/null";
             $wgOutput = (string) $server->executeCommand($wgShowCmd, true);
-            $paramNames = ['jc', 'jmin', 'jmax', 's1', 's2', 'h1', 'h2', 'h3', 'h4'];
+            $paramNames = ['jc', 'jmin', 'jmax', 's1', 's2', 's3', 's4', 'h1', 'h2', 'h3', 'h4'];
             foreach ($paramNames as $param) {
                 if (preg_match('/^\s*' . preg_quote($param, '/') . ':\s*(\d+)/mi', $wgOutput, $matches)) {
                     $awgParams[strtoupper($param)] = (int) $matches[1];
@@ -862,7 +954,7 @@ class VpnClient
         $config .= "DNS = 1.1.1.1, 1.0.0.1\n";
 
         // Add AWG parameters
-        foreach (['Jc', 'Jmin', 'Jmax', 'S1', 'S2', 'H1', 'H2', 'H3', 'H4'] as $key) {
+        foreach (['Jc', 'Jmin', 'Jmax', 'S1', 'S2', 'S3', 'S4', 'H1', 'H2', 'H3', 'H4'] as $key) {
             if (isset($awgParams[$key])) {
                 $config .= "{$key} = {$awgParams[$key]}\n";
                 continue;
@@ -1370,7 +1462,7 @@ class VpnClient
         // If AWG params are missing (common after reinstall), fetch them directly from wg0.conf
         // to avoid falling back to template defaults that will not match the server.
         if (in_array($slug, ['amnezia-wg-advanced', 'awg2'], true)) {
-            $needKeys = ['JC', 'JMIN', 'JMAX', 'S1', 'S2', 'H1', 'H2', 'H3', 'H4'];
+            $needKeys = ['JC', 'JMIN', 'JMAX', 'S1', 'S2', 'S3', 'S4', 'H1', 'H2', 'H3', 'H4'];
             $missing = false;
             foreach ($needKeys as $k) {
                 if (!isset($awgParams[$k])) {
@@ -1438,7 +1530,7 @@ class VpnClient
             'dns_servers' => (string) ($serverData['dns_servers'] ?? '1.1.1.1, 1.0.0.1'),
         ];
 
-        foreach (['JC', 'JMIN', 'JMAX', 'S1', 'S2', 'H1', 'H2', 'H3', 'H4'] as $key) {
+        foreach (['JC', 'JMIN', 'JMAX', 'S1', 'S2', 'S3', 'S4', 'H1', 'H2', 'H3', 'H4'] as $key) {
             if (isset($awgParams[$key])) {
                 $vars[$key] = $awgParams[$key];
             }
@@ -1574,7 +1666,7 @@ class VpnClient
         try {
             // Get previous stats for speed calculation
             $pdo = DB::conn();
-            $stmtPrev = $pdo->prepare('SELECT bytes_sent, bytes_received, last_sync_at, last_handshake FROM vpn_clients WHERE id = ?');
+            $stmtPrev = $pdo->prepare('SELECT bytes_sent, bytes_received, last_sync_at, last_handshake, aivpn_raw_bytes_in, aivpn_raw_bytes_out, aivpn_offset_bytes_in, aivpn_offset_bytes_out FROM vpn_clients WHERE id = ?');
             $stmtPrev->execute([$this->clientId]);
             $prev = $stmtPrev->fetch();
 
@@ -1582,20 +1674,31 @@ class VpnClient
             $prevReceived = (int) ($prev['bytes_received'] ?? 0);
             $prevSyncAt = $prev['last_sync_at'] ? strtotime($prev['last_sync_at']) : 0;
             $prevHandshake = $prev['last_handshake'] ? strtotime($prev['last_handshake']) : 0;
+            $aivpnRawInPrev = (int) ($prev['aivpn_raw_bytes_in'] ?? 0);
+            $aivpnRawOutPrev = (int) ($prev['aivpn_raw_bytes_out'] ?? 0);
+            $aivpnOffsetIn = (int) ($prev['aivpn_offset_bytes_in'] ?? 0);
+            $aivpnOffsetOut = (int) ($prev['aivpn_offset_bytes_out'] ?? 0);
 
             // XRay stats logic
             $stats = [];
 
             // Determine protocol by client's protocol_id
             $isXray = false;
+            $isAivpn = false;
             $xrayContainerName = 'amnezia-xray'; // Default XRay container name
             
             if (!empty($this->data['protocol_id'])) {
                 $stmtProto = $pdo->prepare('SELECT slug FROM protocols WHERE id = ?');
                 $stmtProto->execute([$this->data['protocol_id']]);
                 $protoData = $stmtProto->fetch();
-                if ($protoData && stripos($protoData['slug'], 'xray') !== false) {
-                    $isXray = true;
+                if ($protoData) {
+                    $slug = (string) ($protoData['slug'] ?? '');
+                    if (stripos($slug, 'xray') !== false) {
+                        $isXray = true;
+                    }
+                    if (stripos($slug, 'aivpn') !== false) {
+                        $isAivpn = true;
+                    }
                 }
             }
             
@@ -1605,8 +1708,12 @@ class VpnClient
                 if (strpos($containerName, 'xray') !== false) {
                     $isXray = true;
                     $xrayContainerName = $containerName;
+                } elseif (strpos($containerName, 'aivpn') !== false) {
+                    $isAivpn = true;
                 } elseif (!empty($this->data['config']) && strpos($this->data['config'], 'vless://') !== false) {
                     $isXray = true;
+                } elseif (!empty($this->data['config']) && strpos($this->data['config'], 'aivpn://') === 0) {
+                    $isAivpn = true;
                 }
             }
 
@@ -1648,6 +1755,28 @@ class VpnClient
                     }
                 }
 
+            } elseif ($isAivpn) {
+                $stats = self::getAivpnStatsFromServer($serverData, $this->data);
+                if (!empty($stats)) {
+                    $rawInNow = (int) ($stats['bytes_sent'] ?? 0);
+                    $rawOutNow = (int) ($stats['bytes_received'] ?? 0);
+
+                    if ($rawInNow < $aivpnRawInPrev) {
+                        $aivpnOffsetIn = max($aivpnOffsetIn + $aivpnRawInPrev, $prevSent);
+                    }
+                    if ($rawOutNow < $aivpnRawOutPrev) {
+                        $aivpnOffsetOut = max($aivpnOffsetOut + $aivpnRawOutPrev, $prevReceived);
+                    }
+
+                    $candidateSent = $aivpnOffsetIn + $rawInNow;
+                    $candidateReceived = $aivpnOffsetOut + $rawOutNow;
+                    $stats['bytes_sent'] = max($prevSent, $candidateSent);
+                    $stats['bytes_received'] = max($prevReceived, $candidateReceived);
+
+                    if (empty($stats['last_handshake']) || (int) $stats['last_handshake'] <= 0) {
+                        $stats['last_handshake'] = $prevHandshake;
+                    }
+                }
             }
 
             if (empty($stats)) {
@@ -1681,15 +1810,42 @@ class VpnClient
                 }
             }
 
-            $stmt = $pdo->prepare('
-                UPDATE vpn_clients 
-                SET bytes_sent = ?, bytes_received = ?, last_handshake = ?, current_speed = ?, speed_up = ?, speed_down = ?, last_sync_at = NOW()
-                WHERE id = ?
-            ');
+            $isAivpnPersist = $isAivpn && !empty($stats);
+            if ($isAivpnPersist) {
+                $stmt = $pdo->prepare('
+                    UPDATE vpn_clients 
+                    SET bytes_sent = ?, bytes_received = ?, last_handshake = ?, current_speed = ?, speed_up = ?, speed_down = ?,
+                        aivpn_raw_bytes_in = ?, aivpn_raw_bytes_out = ?, aivpn_offset_bytes_in = ?, aivpn_offset_bytes_out = ?,
+                        last_sync_at = NOW()
+                    WHERE id = ?
+                ');
+            } else {
+                $stmt = $pdo->prepare('
+                    UPDATE vpn_clients 
+                    SET bytes_sent = ?, bytes_received = ?, last_handshake = ?, current_speed = ?, speed_up = ?, speed_down = ?, last_sync_at = NOW()
+                    WHERE id = ?
+                ');
+            }
 
             $lastHandshake = $stats['last_handshake'] > 0
                 ? date('Y-m-d H:i:s', $stats['last_handshake'])
                 : null;
+
+            if ($isAivpnPersist) {
+                return $stmt->execute([
+                    $stats['bytes_sent'],
+                    $stats['bytes_received'],
+                    $lastHandshake,
+                    $currentSpeed,
+                    $speedUp,
+                    $speedDown,
+                    (int) ($stats['bytes_sent_raw'] ?? 0),
+                    (int) ($stats['bytes_received_raw'] ?? 0),
+                    $aivpnOffsetIn,
+                    $aivpnOffsetOut,
+                    $this->clientId
+                ]);
+            }
 
             return $stmt->execute([
                 $stats['bytes_sent'],
@@ -1704,6 +1860,110 @@ class VpnClient
             error_log('Failed to sync client stats: ' . $e->getMessage());
             return false;
         }
+    }
+
+    private static function getAivpnStatsFromServer(array $serverData, array $clientData): array
+    {
+        $stats = [
+            'bytes_sent' => 0,
+            'bytes_received' => 0,
+            'bytes_sent_raw' => 0,
+            'bytes_received_raw' => 0,
+            'last_handshake' => 0,
+        ];
+
+        $containerName = (string) ($serverData['container_name'] ?? '');
+        if ($containerName === '' || stripos($containerName, 'aivpn') === false) {
+            $containerName = 'aivpn-server';
+        }
+
+        $cmd = sprintf('docker exec -i %s cat /etc/aivpn/clients.json 2>/dev/null', escapeshellarg($containerName));
+        $output = self::executeServerCommand($serverData, $cmd, true);
+        if (trim((string) $output) === '') {
+            return $stats;
+        }
+
+        $data = json_decode((string) $output, true);
+        if (!is_array($data) || !isset($data['clients']) || !is_array($data['clients'])) {
+            return $stats;
+        }
+
+        $name = strtolower(trim((string) ($clientData['name'] ?? '')));
+        $clientIp = trim((string) ($clientData['client_ip'] ?? ''));
+        $cfgIp = self::extractAivpnIpFromConfig((string) ($clientData['config'] ?? ''));
+
+        $match = null;
+        foreach ($data['clients'] as $entry) {
+            if (!is_array($entry)) {
+                continue;
+            }
+            $entryName = strtolower(trim((string) ($entry['name'] ?? '')));
+            $entryIp = trim((string) ($entry['vpn_ip'] ?? ''));
+            if ($name !== '' && $entryName === $name) {
+                $match = $entry;
+                break;
+            }
+            if ($clientIp !== '' && $entryIp === $clientIp) {
+                $match = $entry;
+                break;
+            }
+            if ($cfgIp !== '' && $entryIp === $cfgIp) {
+                $match = $entry;
+                break;
+            }
+        }
+
+        if (!is_array($match)) {
+            return $stats;
+        }
+
+        $s = is_array($match['stats'] ?? null) ? $match['stats'] : [];
+        $rawIn = (int) ($s['bytes_in'] ?? 0);
+        $rawOut = (int) ($s['bytes_out'] ?? 0);
+        $stats['bytes_sent_raw'] = $rawIn;
+        $stats['bytes_received_raw'] = $rawOut;
+        $stats['bytes_sent'] = $rawIn;
+        $stats['bytes_received'] = $rawOut;
+
+        if (!empty($s['last_handshake']) && is_string($s['last_handshake'])) {
+            $ts = strtotime($s['last_handshake']);
+            if ($ts !== false) {
+                $stats['last_handshake'] = (int) $ts;
+            }
+        }
+
+        return $stats;
+    }
+
+    private static function extractAivpnIpFromConfig(string $config): string
+    {
+        if (stripos($config, 'aivpn://') !== 0) {
+            return '';
+        }
+
+        $payload = substr($config, strlen('aivpn://'));
+        if ($payload === '') {
+            return '';
+        }
+
+        $b64 = strtr($payload, '-_', '+/');
+        $padLen = strlen($b64) % 4;
+        if ($padLen > 0) {
+            $b64 .= str_repeat('=', 4 - $padLen);
+        }
+
+        $decoded = base64_decode($b64, true);
+        if ($decoded === false) {
+            return '';
+        }
+
+        $data = json_decode($decoded, true);
+        if (!is_array($data)) {
+            return '';
+        }
+
+        $ip = trim((string) ($data['i'] ?? ''));
+        return preg_match('/^\d{1,3}(?:\.\d{1,3}){3}$/', $ip) ? $ip : '';
     }
 
     /**

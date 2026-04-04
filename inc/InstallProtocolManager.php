@@ -319,6 +319,9 @@ class InstallProtocolManager
                 'server_host' => $result['server_host'] ?? null,
                 'container_name' => $result['container_name'] ?? ($metadata['container_name'] ?? null),
             ];
+            if (($protocol['slug'] ?? '') === 'aivpn' && array_key_exists('connection_key', $result)) {
+                $extras['connection_key'] = $result['connection_key'];
+            }
             if (($protocol['slug'] ?? '') === 'xray-vless') {
                 foreach (['client_id', 'container_name', 'server_port', 'xray_port', 'reality_public_key', 'reality_private_key', 'reality_short_id', 'reality_server_name'] as $k) {
                     if (array_key_exists($k, $result)) {
@@ -575,6 +578,9 @@ class InstallProtocolManager
                 ];
             }
             if ($phase === 'add_client') {
+                if (($protocol['slug'] ?? '') === 'aivpn') {
+                    return self::runBuiltinAivpnAddClient($server, $options);
+                }
                 // If no script and no builtin handler, we just skip it (assume not needed or manual)
                 // Or throw generic error? Better return success to not break flow if not implemented for other protocols
                 return ['success' => true, 'message' => 'No add_client script defined'];
@@ -775,10 +781,15 @@ class InstallProtocolManager
         $pairs = [
             'SERVER_HOST' => $serverData['host'] ?? '',
             'SERVER_USER' => $serverData['username'] ?? '',
-            'SERVER_CONTAINER' => $serverData['container_name'] ?? ($metadata['container_name'] ?? ''),
-            'SERVER_PORT' => isset($serverData['vpn_port']) && (int) $serverData['vpn_port'] > 0
-                ? (int) $serverData['vpn_port']
-                : (isset($options['server_port']) ? (int) $options['server_port'] : ''),
+            // Prefer protocol-specific settings for scripted installs to avoid
+            // reusing a container name/port from another protocol on same server.
+            'SERVER_CONTAINER' => $options['container_name']
+                ?? ($metadata['container_name'] ?? ($serverData['container_name'] ?? '')),
+            'SERVER_PORT' => isset($options['server_port']) && (int) $options['server_port'] > 0
+                ? (int) $options['server_port']
+                : (isset($serverData['vpn_port']) && (int) $serverData['vpn_port'] > 0
+                    ? (int) $serverData['vpn_port']
+                    : ''),
         ];
 
         // Check for saved Reality keys in server_protocols table
@@ -876,7 +887,7 @@ class InstallProtocolManager
     private static function parseWireGuardConfig(string $config): array
     {
         $lines = preg_split('/\r?\n/', $config);
-        $awgKeys = ['Jc', 'Jmin', 'Jmax', 'S1', 'S2', 'H1', 'H2', 'H3', 'H4'];
+        $awgKeys = ['Jc', 'Jmin', 'Jmax', 'S1', 'S2', 'S3', 'S4', 'H1', 'H2', 'H3', 'H4'];
         $awgParams = [];
         $listenPort = null;
 
@@ -1290,6 +1301,127 @@ class InstallProtocolManager
             Logger::appendInstall($serverId, 'Activate failed: ' . $e->getMessage());
             throw $e;
         }
+    }
+
+    private static function runBuiltinAivpnAddClient(VpnServer $server, array $options): array
+    {
+        $serverData = $server->getData();
+        $containerName = trim((string) ($options['container_name'] ?? ($serverData['container_name'] ?? '')));
+        if ($containerName === '' || stripos($containerName, 'aivpn') === false) {
+            $containerName = 'aivpn-server';
+        }
+
+        $clientName = trim((string) ($options['login'] ?? ($options['name'] ?? '')));
+        if ($clientName === '') {
+            $clientName = 'client-' . date('YmdHis');
+        }
+
+        $serverHostRaw = trim((string) ($options['server_host'] ?? ($serverData['host'] ?? '')));
+        $serverHostSanitized = preg_replace('#^https?://#i', '', $serverHostRaw);
+        $serverHostSanitized = preg_replace('#/.*$#', '', $serverHostSanitized ?? '');
+        $serverHost = $serverHostSanitized;
+        $embeddedPort = null;
+        if ($serverHostSanitized !== '' && preg_match('/^(.+?)(?::\d+)+$/', $serverHostSanitized, $m)) {
+            $serverHost = trim((string) $m[1]);
+            if (preg_match('/:(\d+)$/', $serverHostSanitized, $pm)) {
+                $embeddedPort = (int) $pm[1];
+            }
+        }
+
+        $defaultPort = 443;
+        if (stripos((string) ($serverData['install_protocol'] ?? ''), 'aivpn') !== false && (int) ($serverData['vpn_port'] ?? 0) > 0) {
+            $defaultPort = (int) $serverData['vpn_port'];
+        }
+        $serverPort = isset($options['server_port']) ? (int) $options['server_port'] : 0;
+        if ($serverPort <= 0 && $embeddedPort !== null && $embeddedPort > 0) {
+            $serverPort = $embeddedPort;
+        }
+        if ($serverPort <= 0) {
+            $serverPort = $defaultPort;
+        }
+        if (
+            stripos((string) ($serverData['install_protocol'] ?? ''), 'aivpn') === false &&
+            $embeddedPort === null &&
+            (int) ($serverData['vpn_port'] ?? 0) > 0 &&
+            $serverPort === (int) $serverData['vpn_port']
+        ) {
+            $serverPort = 443;
+        }
+        if ($serverPort <= 0) {
+            $serverPort = 443;
+        }
+
+        $cmdParts = [
+            'docker',
+            'exec',
+            '-i',
+            escapeshellarg($containerName),
+            'aivpn-server',
+            '--add-client',
+            escapeshellarg($clientName),
+            '--key-file',
+            '/etc/aivpn/server.key',
+            '--clients-db',
+            '/etc/aivpn/clients.json',
+        ];
+
+        if ($serverHost !== '') {
+            $cmdParts[] = '--server-ip';
+            $cmdParts[] = escapeshellarg($serverHost . ':' . $serverPort);
+        }
+
+        $cmd = implode(' ', $cmdParts);
+        Logger::appendInstall($server->getId(), 'Adding AIVPN client via builtin add_client: ' . $clientName . ' in ' . $containerName);
+        $output = (string) $server->executeCommand($cmd, true);
+        $parsed = self::parseAivpnAddClientOutput($output);
+
+        if (empty($parsed['connection_uri']) && empty($parsed['connection_key'])) {
+            $head = substr(str_replace(["\r", "\n"], ' ', trim($output)), 0, 220);
+            throw new Exception('AIVPN add_client succeeded but no connection key found in output: ' . $head);
+        }
+
+        $result = ['success' => true];
+        if (!empty($parsed['connection_uri'])) {
+            $result['connection_uri'] = $parsed['connection_uri'];
+        }
+        if (!empty($parsed['connection_key'])) {
+            $result['connection_key'] = $parsed['connection_key'];
+        }
+        if (!empty($parsed['client_ip'])) {
+            $result['client_ip'] = $parsed['client_ip'];
+        }
+        if (!empty($parsed['client_id'])) {
+            $result['client_id'] = $parsed['client_id'];
+        }
+
+        return $result;
+    }
+
+    private static function parseAivpnAddClientOutput(string $output): array
+    {
+        $result = [];
+        $trimmed = trim($output);
+        if ($trimmed === '') {
+            return $result;
+        }
+
+        if (preg_match('/(aivpn:\/\/[A-Za-z0-9_\-+=\/]+)/', $trimmed, $m)) {
+            $uri = trim((string) $m[1]);
+            $result['connection_uri'] = $uri;
+            if (stripos($uri, 'aivpn://') === 0) {
+                $result['connection_key'] = substr($uri, strlen('aivpn://'));
+            }
+        }
+
+        if (preg_match('/\bID:\s*([a-zA-Z0-9]+)/', $trimmed, $m)) {
+            $result['client_id'] = trim((string) $m[1]);
+        }
+
+        if (preg_match('/\bVPN\s*IP:\s*([0-9.]+)/i', $trimmed, $m)) {
+            $result['client_ip'] = trim((string) $m[1]);
+        }
+
+        return $result;
     }
 
     private static function runBuiltinXrayAddClient(VpnServer $server, array $options): array
