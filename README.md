@@ -118,7 +118,6 @@ JWT_SECRET=your-secret-key-change-this
 ### Add VPN Server
 
 1. Servers → Add Server
-1. Servers → Add Server
 2. Enter: name, host IP, SSH port, username
 3. Choose authentication method: **Password** or **SSH Key**
    - For SSH Key: Paste your private key (PEM/OpenSSH format)
