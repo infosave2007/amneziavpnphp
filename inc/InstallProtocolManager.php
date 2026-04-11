@@ -6,6 +6,62 @@ class InstallProtocolManager
     private const DEFAULT_SLUG = 'amnezia-wg';
     private const SESSION_KEY = 'pending_deploy_decisions';
 
+    private static function resolveAivpnContainerName(VpnServer $server, array $options = []): string
+    {
+        $serverData = $server->getData();
+        $candidates = array_values(array_unique(array_filter([
+            trim((string) ($options['container_name'] ?? '')),
+            trim((string) ($serverData['container_name'] ?? '')),
+            'aivpn-server',
+        ], static function ($value) {
+            return is_string($value) && $value !== '';
+        })));
+
+        $namesRaw = (string) $server->executeCommand("docker ps -a --format '{{.Names}}' 2>/dev/null", true);
+        $names = array_values(array_filter(array_map('trim', preg_split('/\r?\n/', $namesRaw) ?: []), static function ($value) {
+            return $value !== '';
+        }));
+
+        foreach ($candidates as $candidate) {
+            if (in_array($candidate, $names, true)) {
+                return $candidate;
+            }
+        }
+
+        foreach ($candidates as $candidate) {
+            foreach ($names as $name) {
+                if (stripos($name, $candidate) !== false) {
+                    self::persistServerContainerName($server->getId(), $name);
+                    return $name;
+                }
+            }
+        }
+
+        foreach ($names as $name) {
+            if (stripos($name, 'aivpn-server') !== false || stripos($name, 'aivpn') !== false) {
+                self::persistServerContainerName($server->getId(), $name);
+                return $name;
+            }
+        }
+
+        return $candidates[0] ?? 'aivpn-server';
+    }
+
+    private static function persistServerContainerName(int $serverId, string $containerName): void
+    {
+        $containerName = trim($containerName);
+        if ($serverId <= 0 || $containerName === '') {
+            return;
+        }
+
+        try {
+            $pdo = DB::conn();
+            $stmt = $pdo->prepare('UPDATE vpn_servers SET container_name = ? WHERE id = ?');
+            $stmt->execute([$containerName, $serverId]);
+        } catch (Throwable $e) {
+        }
+    }
+
     public static function getDefaultSlug(): string
     {
         return self::DEFAULT_SLUG;
@@ -1442,10 +1498,7 @@ class InstallProtocolManager
     private static function runBuiltinAivpnAddClient(VpnServer $server, array $options): array
     {
         $serverData = $server->getData();
-        $containerName = trim((string) ($options['container_name'] ?? ($serverData['container_name'] ?? '')));
-        if ($containerName === '' || stripos($containerName, 'aivpn') === false) {
-            $containerName = 'aivpn-server';
-        }
+        $containerName = self::resolveAivpnContainerName($server, $options);
 
         $clientName = trim((string) ($options['login'] ?? ($options['name'] ?? '')));
         if ($clientName === '') {
