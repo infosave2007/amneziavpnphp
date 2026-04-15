@@ -142,26 +142,14 @@ class VpnClient
                 }
             }
 
+            $defaultAwgParams = self::getAwgParamDefaults($slug);
+
             // Add AWG parameters (use UPPERCASE keys internal logic)
-            foreach (['JC', 'JMIN', 'JMAX', 'S1', 'S2', 'S3', 'S4', 'H1', 'H2', 'H3', 'H4'] as $key) {
+            foreach (array_keys($defaultAwgParams) as $key) {
                 if (isset($cleanAwgParams[$key])) {
                     $vars[$key] = $cleanAwgParams[$key];
                 } else {
-                    // Default values for AWG params (Fallback only)
-                    $defaults = [
-                        'JC' => 5,
-                        'JMIN' => 100,
-                        'JMAX' => 200,
-                        'S1' => 50,
-                        'S2' => 100,
-                        'S3' => 20,
-                        'S4' => 10,
-                        'H1' => 1,
-                        'H2' => 2,
-                        'H3' => 3,
-                        'H4' => 4,
-                    ];
-                    $vars[$key] = $defaults[$key] ?? 0;
+                    $vars[$key] = $defaultAwgParams[$key];
                 }
             }
 
@@ -175,6 +163,11 @@ class VpnClient
             }
             if (!isset($vars['Jmax']) && isset($vars['JMAX'])) {
                 $vars['Jmax'] = (string) $vars['JMAX'];
+            }
+            foreach (['S1', 'S2', 'S3', 'S4', 'H1', 'H2', 'H3', 'H4', 'I1', 'I2', 'I3', 'I4', 'I5'] as $key) {
+                if (!isset($vars[$key]) && isset($vars[strtoupper($key)])) {
+                    $vars[$key] = (string) $vars[strtoupper($key)];
+                }
             }
 
             // Generate config from template
@@ -190,12 +183,13 @@ class VpnClient
                     $serverData['preshared_key'],
                     $serverData['host'],
                     $serverData['vpn_port'],
-                    is_array($awgParams) ? $awgParams : []
+                    is_array($awgParams) ? $awgParams : [],
+                    $slug
                 );
             }
 
             self::addClientToServer($serverData, $keys['public'], $clientIP);
-            $qrCode = self::generateQRCode($config);
+            $qrCode = self::generateQRCode($config, $slug);
             $priv = $keys['private'];
             $pub = $keys['public'];
             $psk = $serverData['preshared_key'];
@@ -501,7 +495,7 @@ class VpnClient
                 $vars['last_config_json'] = json_encode($decoded, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
             }
 
-            $qrCode = self::generateQRCode($config);
+            $qrCode = self::generateQRCode($config, $slug);
 
             $priv = '';
             $pub = '';
@@ -636,7 +630,8 @@ class VpnClient
                 $presharedKey,
                 $serverData['host'],
                 (int) $serverData['vpn_port'],
-                $awgParams
+                $awgParams,
+                (string) ($serverData['install_protocol'] ?? '')
             );
         }
 
@@ -654,7 +649,7 @@ class VpnClient
             $vars['last_config_json'] = json_encode($decoded, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
         }
 
-        $qrCode = $config !== '' ? self::generateQRCode($config) : '';
+        $qrCode = $config !== '' ? self::generateQRCode($config, $serverData['install_protocol'] ?? '') : '';
         $status = strtolower($clientData['status'] ?? 'active') === 'disabled' ? 'disabled' : 'active';
 
         $expiresAt = $clientData['expires_at'] ?? null;
@@ -784,12 +779,50 @@ class VpnClient
     /**
      * Auto-sync server keys from running container (for externally installed protocols)
      */
+    private static function getAwgParamDefaults(string $protocolSlug = ''): array
+    {
+        if ($protocolSlug === 'awg2') {
+            return [
+                'JC' => 5,
+                'JMIN' => 10,
+                'JMAX' => 50,
+                'S1' => 51,
+                'S2' => 125,
+                'S3' => 13,
+                'S4' => 9,
+                'H1' => '1443912531-1981073285',
+                'H2' => '1984025557-2135018048',
+                'H3' => '2145217268-2146643749',
+                'H4' => '2146790761-2146860793',
+                'I1' => '<r 2><b 0x858000010001000000000669636c6f756403636f6d0000010001c00c000100010000105a00044d583737>',
+                'I2' => '',
+                'I3' => '',
+                'I4' => '',
+                'I5' => '',
+            ];
+        }
+
+        return [
+            'JC' => 5,
+            'JMIN' => 100,
+            'JMAX' => 200,
+            'S1' => 50,
+            'S2' => 100,
+            'S3' => 20,
+            'S4' => 10,
+            'H1' => 1,
+            'H2' => 2,
+            'H3' => 3,
+            'H4' => 4,
+        ];
+    }
+
     private static function extractAwgParamsFromWg0Conf(VpnServer $server, string $containerName, string $confPath): array
     {
         $awgParams = [];
 
         $awgLinesCmd = sprintf(
-            "docker exec %s sh -c \"grep -E '^[[:space:]]*(Jc|Jmin|Jmax|S1|S2|S3|S4|H1|H2|H3|H4)[[:space:]]*=' %s 2>/dev/null || true\"",
+            "docker exec %s sh -c \"grep -E '^[[:space:]]*(Jc|Jmin|Jmax|S1|S2|S3|S4|H1|H2|H3|H4|I1|I2|I3|I4|I5)[[:space:]]*=' %s 2>/dev/null || true\"",
             escapeshellarg($containerName),
             escapeshellarg($confPath)
         );
@@ -800,9 +833,10 @@ class VpnClient
             if ($line === '') {
                 continue;
             }
-            if (preg_match('/^(Jc|Jmin|Jmax|S1|S2|S3|S4|H1|H2|H3|H4)\s*=\s*(\d+)\s*$/i', $line, $m)) {
+            if (preg_match('/^(Jc|Jmin|Jmax|S1|S2|S3|S4|H1|H2|H3|H4|I1|I2|I3|I4|I5)\s*=\s*(.*)$/i', $line, $m)) {
                 $k = strtoupper($m[1]);
-                $awgParams[$k] = (int) $m[2];
+                $value = trim($m[2]);
+                $awgParams[$k] = ctype_digit($value) ? (int) $value : $value;
             }
         }
 
@@ -911,10 +945,18 @@ class VpnClient
             // Legacy attempt: some builds print jc/jmin/... in `wg show` output.
             $wgShowCmd = "docker exec $containerName wg show wg0 2>/dev/null";
             $wgOutput = (string) $server->executeCommand($wgShowCmd, true);
-            $paramNames = ['jc', 'jmin', 'jmax', 's1', 's2', 's3', 's4', 'h1', 'h2', 'h3', 'h4'];
+            $paramNames = ['jc', 'jmin', 'jmax', 's1', 's2', 's3', 's4', 'h1', 'h2', 'h3', 'h4', 'i1', 'i2', 'i3', 'i4', 'i5'];
             foreach ($paramNames as $param) {
-                if (preg_match('/^\s*' . preg_quote($param, '/') . ':\s*(\d+)/mi', $wgOutput, $matches)) {
-                    $awgParams[strtoupper($param)] = (int) $matches[1];
+                // For H1-H4 parameters, expect format like "1443912531-1981073285" (two values with dash)
+                // For other parameters, expect single integer value
+                if (in_array($param, ['h1', 'h2', 'h3', 'h4'], true)) {
+                    if (preg_match('/^\s*' . preg_quote($param, '/') . ':\s*(\d+-\d+)/mi', $wgOutput, $matches)) {
+                        $awgParams[strtoupper($param)] = $matches[1];
+                    }
+                } else {
+                    if (preg_match('/^\s*' . preg_quote($param, '/') . ':\s*(\d+)/mi', $wgOutput, $matches)) {
+                        $awgParams[strtoupper($param)] = (int) $matches[1];
+                    }
                 }
             }
 
@@ -962,24 +1004,60 @@ class VpnClient
         string $presharedKey,
         string $serverHost,
         int $serverPort,
-        array $awgParams
+        array $awgParams,
+        string $protocolSlug = ''
     ): string {
+        // Get default parameters for the protocol
+        $defaultParams = self::getAwgParamDefaults($protocolSlug);
+        
+        // Normalize $awgParams keys to uppercase for consistency
+        $normalizedAwgParams = [];
+        foreach ($awgParams as $k => $v) {
+            $normalizedAwgParams[strtoupper($k)] = $v;
+        }
+        
+        // Merge: use server params only if they have correct format, otherwise use defaults
+        // This is critical for H1-H4 which must have "value1-value2" format
+        $finalParams = $defaultParams;
+        foreach ($normalizedAwgParams as $key => $value) {
+            $upperKey = strtoupper($key);
+            
+            // For H1-H4 parameters, only use server value if it has the correct "value1-value2" format
+            if (in_array($upperKey, ['H1', 'H2', 'H3', 'H4'], true)) {
+                if (is_string($value) && preg_match('/^\d+-\d+$/', $value)) {
+                    $finalParams[$upperKey] = $value;
+                }
+                // Otherwise keep the default value
+            } else {
+                // For other parameters, use server value if present
+                $finalParams[$upperKey] = $value;
+            }
+        }
+        
         $config = "[Interface]\n";
-        $config .= "PrivateKey = {$privateKey}\n";
         $config .= "Address = {$clientIP}/32\n";
         $config .= "DNS = 1.1.1.1, 1.0.0.1\n";
+        $config .= "PrivateKey = {$privateKey}\n";
 
-        // Add AWG parameters
-        foreach (['Jc', 'Jmin', 'Jmax', 'S1', 'S2', 'S3', 'S4', 'H1', 'H2', 'H3', 'H4'] as $key) {
-            if (isset($awgParams[$key])) {
-                $config .= "{$key} = {$awgParams[$key]}\n";
-                continue;
+        // Add AWG parameters (in the order used by Amnezia app)
+        // For awg2 include I1-I5, S3, S4; for regular awg only H1-H4, Jc, Jmin, Jmax, S1, S2
+        // Order: Jc, Jmin, Jmax, S1, S2, S3, S4, H1, H2, H3, H4, I1, I2, I3, I4, I5
+        $paramKeys = ['Jc', 'Jmin', 'Jmax', 'S1', 'S2', 'S3', 'S4', 'H1', 'H2', 'H3', 'H4'];
+        if ($protocolSlug === 'awg2') {
+            $paramKeys = array_merge($paramKeys, ['I1', 'I2', 'I3', 'I4', 'I5']);
+        }
+        
+        foreach ($paramKeys as $key) {
+            $value = null;
+            if (isset($finalParams[$key])) {
+                $value = $finalParams[$key];
+            } elseif (isset($finalParams[strtoupper($key)])) {
+                $value = $finalParams[strtoupper($key)];
             }
-
-            // Accept uppercase keys too (JC/JMIN/JMAX/...)
-            $alt = strtoupper($key);
-            if (isset($awgParams[$alt])) {
-                $config .= "{$key} = {$awgParams[$alt]}\n";
+            
+            // Always add parameter if it's defined (even if empty for I2-I5)
+            if ($value !== null) {
+                $config .= "{$key} = {$value}\n";
             }
         }
 
@@ -1122,7 +1200,7 @@ class VpnClient
      * Generate QR code for configuration using Amnezia format
      * Uses working QrUtil from /Users/oleg/Documents/amnezia
      */
-    private static function generateQRCode(string $config): string
+    private static function generateQRCode(string $config, string $protocolSlug = ''): string
     {
         require_once __DIR__ . '/QrUtil.php';
 
@@ -1158,8 +1236,8 @@ class VpnClient
             }
 
             // Fallback for WireGuard / default
-            // Use old Amnezia format with Qt/QDataStream encoding
-            $payloadOld = QrUtil::encodeOldPayloadFromConf($config);
+            // Use old Amnezia format with Qt/QDataStream encoding, but pass protocol slug
+            $payloadOld = QrUtil::encodeOldPayloadFromConf($config, $protocolSlug);
             $dataUri = QrUtil::pngBase64($payloadOld);
             return $dataUri;
         } catch (Throwable $e) {
@@ -1484,7 +1562,7 @@ class VpnClient
         // by duplicating them into canonical uppercase AWG keys.
         foreach ($awgParams as $k => $v) {
             $uk = strtoupper((string) $k);
-            if (in_array($uk, ['JC', 'JMIN', 'JMAX', 'S1', 'S2', 'S3', 'S4', 'H1', 'H2', 'H3', 'H4'], true) && !isset($awgParams[$uk])) {
+            if (in_array($uk, ['JC', 'JMIN', 'JMAX', 'S1', 'S2', 'S3', 'S4', 'H1', 'H2', 'H3', 'H4', 'I1', 'I2', 'I3', 'I4', 'I5'], true) && !isset($awgParams[$uk])) {
                 $awgParams[$uk] = $v;
             }
         }
@@ -1524,12 +1602,7 @@ class VpnClient
                 }
             }
 
-            if (!isset($awgParams['S3'])) {
-                $awgParams['S3'] = 0;
-            }
-            if (!isset($awgParams['S4'])) {
-                $awgParams['S4'] = 0;
-            }
+            $awgParams = array_merge(self::getAwgParamDefaults($slug), $awgParams);
 
             // Still missing? Refuse to overwrite config with template defaults.
             foreach ($needKeys as $k) {
@@ -1567,7 +1640,7 @@ class VpnClient
             'dns_servers' => (string) ($serverData['dns_servers'] ?? '1.1.1.1, 1.0.0.1'),
         ];
 
-        foreach (['JC', 'JMIN', 'JMAX', 'S1', 'S2', 'S3', 'S4', 'H1', 'H2', 'H3', 'H4'] as $key) {
+        foreach (array_keys(self::getAwgParamDefaults($slug)) as $key) {
             if (isset($awgParams[$key])) {
                 $vars[$key] = $awgParams[$key];
             }
@@ -1582,6 +1655,11 @@ class VpnClient
         if (!isset($vars['Jmax']) && isset($vars['JMAX'])) {
             $vars['Jmax'] = (string) $vars['JMAX'];
         }
+        foreach (['S1', 'S2', 'S3', 'S4', 'H1', 'H2', 'H3', 'H4', 'I1', 'I2', 'I3', 'I4', 'I5'] as $key) {
+            if (!isset($vars[$key]) && isset($vars[strtoupper($key)])) {
+                $vars[$key] = (string) $vars[strtoupper($key)];
+            }
+        }
 
         if ($protoRow && !empty($protoRow['output_template'])) {
             require_once __DIR__ . '/ProtocolService.php';
@@ -1594,11 +1672,12 @@ class VpnClient
                 $presharedKeyForConfig,
                 (string) ($serverData['host'] ?? ''),
                 (int) ($serverData['vpn_port'] ?? 0),
-                $awgParams
+                $awgParams,
+                $slug
             );
         }
 
-        $qrCode = self::generateQRCode($config);
+        $qrCode = self::generateQRCode($config, $slug);
 
         $pdo = DB::conn();
         $stmt = $pdo->prepare('UPDATE vpn_clients SET config = ?, qr_code = ?, preshared_key = ? WHERE id = ?');

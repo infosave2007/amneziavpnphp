@@ -356,7 +356,7 @@ class InstallProtocolManager
             $awgParams = $result['awg_params'] ?? null;
             if (!is_array($awgParams)) {
                 $flat = [];
-                foreach (['Jc', 'Jmin', 'Jmax', 'S1', 'S2', 'S3', 'S4', 'H1', 'H2', 'H3', 'H4'] as $k) {
+                foreach (['Jc', 'Jmin', 'Jmax', 'S1', 'S2', 'S3', 'S4', 'H1', 'H2', 'H3', 'H4', 'I1', 'I2', 'I3', 'I4', 'I5'] as $k) {
                     if (array_key_exists($k, $result) && $result[$k] !== '' && $result[$k] !== null) {
                         $flat[$k] = $result[$k];
                     }
@@ -1037,7 +1037,7 @@ class InstallProtocolManager
     private static function parseWireGuardConfig(string $config): array
     {
         $lines = preg_split('/\r?\n/', $config);
-        $awgKeys = ['Jc', 'Jmin', 'Jmax', 'S1', 'S2', 'S3', 'S4', 'H1', 'H2', 'H3', 'H4'];
+        $awgKeys = ['Jc', 'Jmin', 'Jmax', 'S1', 'S2', 'S3', 'S4', 'H1', 'H2', 'H3', 'H4', 'I1', 'I2', 'I3', 'I4', 'I5'];
         $awgParams = [];
         $listenPort = null;
 
@@ -1333,7 +1333,7 @@ class InstallProtocolManager
                 $resolvedAwgParams = $res['awg_params'] ?? null;
                 if (!is_array($resolvedAwgParams)) {
                     $candidate = [];
-                    foreach (['Jc', 'Jmin', 'Jmax', 'S1', 'S2', 'H1', 'H2', 'H3', 'H4'] as $k) {
+                    foreach (['Jc', 'Jmin', 'Jmax', 'S1', 'S2', 'S3', 'S4', 'H1', 'H2', 'H3', 'H4', 'I1', 'I2', 'I3', 'I4', 'I5'] as $k) {
                         if (array_key_exists($k, $res)) {
                             $candidate[$k] = $res[$k];
                         }
