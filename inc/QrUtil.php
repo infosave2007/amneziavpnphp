@@ -74,10 +74,34 @@ class QrUtil
         return self::urlsafe_b64_encode($header . $compressed);
     }
 
-    public static function encodeOldPayloadFromConf(string $confText): string
+    public static function encodeOldPayloadFromConf(string $confText, string $protocolSlug = ''): string
     {
-        $payload = self::buildOldEnvelopeFromConf($confText);
+        // For AWG2, use simple format: header + plain config text (like real Amnezia app)
+        // For other protocols, use the old JSON+compression format for backward compatibility
+        if ($protocolSlug === 'awg2') {
+            return self::encodeSimpleConf($confText);
+        }
+        
+        // Old format for backward compatibility with regular AWG
+        $payload = self::buildOldEnvelopeFromConf($confText, $protocolSlug);
         return self::encodeOldPayloadFromJson(json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT));
+    }
+
+    /**
+     * Encode config in simple format used by real Amnezia app for AWG2:
+     * Header (8 bytes): version (4) + length (4) + config text
+     * No compression, no JSON wrapper
+     *
+     * Note: In real app, bytes 8-11 contain first 4 bytes of config text,
+     * not a separate field. So header is only 8 bytes.
+     */
+    private static function encodeSimpleConf(string $confText): string
+    {
+        $version = 0x07C00100; // Amnezia magic version number
+        $length = strlen($confText);
+        
+        $header = pack('N2', $version, $length);
+        return self::urlsafe_b64_encode($header . $confText);
     }
 
     private static function resolveServerDescription(?string $endpointHost): string
@@ -181,11 +205,18 @@ class QrUtil
             'H2' => null,
             'H3' => null,
             'H4' => null,
+            'I1' => null,
+            'I2' => null,
+            'I3' => null,
+            'I4' => null,
+            'I5' => null,
             'Jc' => null,
             'Jmin' => null,
             'Jmax' => null,
             'S1' => null,
             'S2' => null,
+            'S3' => null,
+            'S4' => null,
         ];
         foreach (explode("\n", $conf) as $line) {
             $line = trim($line);
@@ -203,11 +234,18 @@ class QrUtil
             'H2' => (string) ($params['H2'] ?? ''),
             'H3' => (string) ($params['H3'] ?? ''),
             'H4' => (string) ($params['H4'] ?? ''),
+            'I1' => (string) ($params['I1'] ?? ''),
+            'I2' => (string) ($params['I2'] ?? ''),
+            'I3' => (string) ($params['I3'] ?? ''),
+            'I4' => (string) ($params['I4'] ?? ''),
+            'I5' => (string) ($params['I5'] ?? ''),
             'Jc' => (string) ($params['Jc'] ?? ''),
             'Jmax' => (string) ($params['Jmax'] ?? ''),
             'Jmin' => (string) ($params['Jmin'] ?? ''),
             'S1' => (string) ($params['S1'] ?? ''),
             'S2' => (string) ($params['S2'] ?? ''),
+            'S3' => (string) ($params['S3'] ?? ''),
+            'S4' => (string) ($params['S4'] ?? ''),
             'allowed_ips' => $allowedIps ?: ['0.0.0.0/0', '::/0'],
             'clientId' => $clientPubKey ?: '',
             'client_ip' => preg_replace('/\/(\d{1,2})$/', '', (string) ($address ?? '')),
@@ -249,7 +287,7 @@ class QrUtil
         return $vars;
     }
 
-    private static function buildOldEnvelopeFromConf(string $conf): array
+    private static function buildOldEnvelopeFromConf(string $conf, string $protocolSlug = ''): array
     {
         $endpointHost = null;
         $endpointPort = null;
@@ -327,11 +365,18 @@ class QrUtil
             'H2' => null,
             'H3' => null,
             'H4' => null,
+            'I1' => null,
+            'I2' => null,
+            'I3' => null,
+            'I4' => null,
+            'I5' => null,
             'Jc' => null,
             'Jmin' => null,
             'Jmax' => null,
             'S1' => null,
             'S2' => null,
+            'S3' => null,
+            'S4' => null,
         ];
         foreach (explode("\n", $conf) as $line) {
             $line = trim($line);
@@ -349,11 +394,18 @@ class QrUtil
             'H2' => (string) ($params['H2'] ?? ''),
             'H3' => (string) ($params['H3'] ?? ''),
             'H4' => (string) ($params['H4'] ?? ''),
+            'I1' => (string) ($params['I1'] ?? ''),
+            'I2' => (string) ($params['I2'] ?? ''),
+            'I3' => (string) ($params['I3'] ?? ''),
+            'I4' => (string) ($params['I4'] ?? ''),
+            'I5' => (string) ($params['I5'] ?? ''),
             'Jc' => (string) ($params['Jc'] ?? ''),
             'Jmax' => (string) ($params['Jmax'] ?? ''),
             'Jmin' => (string) ($params['Jmin'] ?? ''),
             'S1' => (string) ($params['S1'] ?? ''),
             'S2' => (string) ($params['S2'] ?? ''),
+            'S3' => (string) ($params['S3'] ?? ''),
+            'S4' => (string) ($params['S4'] ?? ''),
             'allowed_ips' => $allowedIps ?: ['0.0.0.0/0', '::/0'],
             'clientId' => $clientPubKey ?: '',
             'client_ip' => preg_replace('/\/(\d{1,2})$/', '', (string) ($address ?? '')),
@@ -388,11 +440,19 @@ class QrUtil
                         'last_config' => json_encode($lastConfigObj, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT),
                         'port' => (string) $endpointPort,
                         'transport_proto' => 'udp',
-                    ],
-                    'container' => 'amnezia-awg',
+                    ] + ($protocolSlug === 'awg2' ? [
+                        'I1' => (string) ($params['I1'] ?? ''),
+                        'I2' => (string) ($params['I2'] ?? ''),
+                        'I3' => (string) ($params['I3'] ?? ''),
+                        'I4' => (string) ($params['I4'] ?? ''),
+                        'I5' => (string) ($params['I5'] ?? ''),
+                        'S3' => (string) ($params['S3'] ?? ''),
+                        'S4' => (string) ($params['S4'] ?? ''),
+                    ] : []),
+                    'container' => $protocolSlug === 'awg2' ? 'amnezia-awg2' : 'amnezia-awg',
                 ],
             ],
-            'defaultContainer' => 'amnezia-awg',
+            'defaultContainer' => $protocolSlug === 'awg2' ? 'amnezia-awg2' : 'amnezia-awg',
             'description' => $serverDesc,
             'dns1' => $dns1,
             'dns2' => $dns2,

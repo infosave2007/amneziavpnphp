@@ -74,3 +74,5 @@ scripts/fix_server_visibility.sh
 scripts/remote_fix_client_create.sh
 scripts/retest_client_api.sh
 scripts/awg2_retest_final.sh
+migrations/065_aivpn_prebuilt.sql
+migrations/069_fix_aivpn_prebuilt_binary.sql
