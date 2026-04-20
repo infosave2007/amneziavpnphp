@@ -586,6 +586,8 @@ class InstallProtocolManager
         }
         $restored = 0;
         $pid = self::resolveProtocolId($protocol);
+        $needsServerConfigUpdate = false;
+        $keyUpdates = []; // Array of ['old' => $oldPub, 'new' => $newPub]
         Logger::appendInstall($serverId, "Restore: protocol_id={$pid}, wgConfig empty=" . (trim($wgConfig) === '' ? 'yes' : 'no'));
         if (trim($wgConfig) !== '') {
             $pattern = '/\[Peer\][^\[]*?PublicKey\s*=\s*(.+?)\s*[\r\n]+[\s\S]*?AllowedIPs\s*=\s*(.+?)(?:\r?\n|$)/';
@@ -611,29 +613,113 @@ class InstallProtocolManager
                         continue;
                     }
                     $name = $nameByPub[$pub] ?? ('import-' . str_replace('.', '_', $clientIp));
-                    $ins = $pdo->prepare('INSERT INTO vpn_clients (server_id, user_id, name, client_ip, public_key, private_key, preshared_key, config, protocol_id, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())');
+                    
+                    // Try to find existing client in database with this public key
+                    $stmt = $pdo->prepare('SELECT id, private_key, config, qr_code FROM vpn_clients WHERE server_id = ? AND public_key = ? LIMIT 1');
+                    $stmt->execute([$server->getId(), $pub]);
+                    $existingClient = $stmt->fetch();
+                    
+                    $privateKey = $existingClient['private_key'] ?? '';
+                    $config = $existingClient['config'] ?? '';
+                    $qrCode = $existingClient['qr_code'] ?? '';
+                    $newPublicKey = $pub; // By default use existing public key
+                    
+                    // If client exists in DB with private key, use existing config
+                    // Otherwise generate new key pair and update server config
+                    if (!empty($privateKey) && $existingClient) {
+                        // Use existing keys and config
+                    } else {
+                        // Generate new key pair for this client
+                        $newPrivateKey = trim($server->executeCommand("docker exec -i {$containerArg} /usr/bin/awg genkey 2>/dev/null", true));
+                        $newPublicKey = trim($server->executeCommand("docker exec -i {$containerArg} sh -c 'echo \"'\"$newPrivateKey\"'\" | /usr/bin/awg pubkey' 2>/dev/null", true));
+                        
+                        if (!empty($newPrivateKey) && !empty($newPublicKey)) {
+                            $privateKey = $newPrivateKey;
+                            $protocolSlug = $protocol['slug'] ?? '';
+                            $config = VpnClient::buildClientConfig(
+                                $privateKey,
+                                $clientIp,
+                                $details['server_public_key'] ?? '',
+                                $details['preshared_key'] ?? '',
+                                $serverData['ip_address'] ?? $serverData['hostname'] ?? '',
+                                $details['vpn_port'] ?? 51820,
+                                $details['awg_params'] ?? [],
+                                $protocolSlug
+                            );
+                            $qrCode = VpnClient::generateQRCode($config, $protocolSlug);
+                            
+                            // Mark that we need to update server config with new public key
+                            $needsServerConfigUpdate = true;
+                            $keyUpdates[] = ['old' => $pub, 'new' => $newPublicKey];
+                        }
+                    }
+                    
+                    $ins = $pdo->prepare('INSERT INTO vpn_clients (server_id, user_id, name, client_ip, public_key, private_key, preshared_key, config, qr_code, protocol_id, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())');
                     $ins->execute([
                         $server->getId(),
                         $serverData['user_id'] ?? null,
                         $name,
                         $clientIp,
-                        $pub,
-                        '',
+                        $newPublicKey,
+                        $privateKey,
                         $details['preshared_key'] ?? null,
-                        '',
+                        $config,
+                        $qrCode,
                         $pid ?: null,
-                        'active'  // Import as active since they already work on the server
+                        'active'
                     ]);
                     $restored++;
                 }
             }
         }
 
+        // Update server config if any keys were regenerated
+        if ($needsServerConfigUpdate && !empty($keyUpdates)) {
+            Logger::appendInstall($serverId, "Restore: updating server config with " . count($keyUpdates) . " new public keys");
+            
+            // Update awg0.conf - replace old public keys with new ones
+            $updatedConfig = $wgConfig;
+            foreach ($keyUpdates as $update) {
+                // Escape special characters for regex
+                $oldEscaped = preg_quote($update['old'], '/');
+                $updatedConfig = preg_replace(
+                    '/(PublicKey\s*=\s*)' . $oldEscaped . '/',
+                    '${1}' . $update['new'],
+                    $updatedConfig
+                );
+            }
+            
+            // Write updated config back to container
+            $escapedConfig = addslashes($updatedConfig);
+            $server->executeCommand("docker exec -i {$containerArg} sh -c 'echo \"$escapedConfig\" > {$configDir}/{$configFile}'", true);
+            
+            // Update clientsTable with new public keys
+            $updatedTable = $clientsTable;
+            if (is_array($updatedTable)) {
+                foreach ($keyUpdates as $update) {
+                    foreach ($updatedTable as &$entry) {
+                        if (($entry['clientId'] ?? '') === $update['old']) {
+                            $entry['clientId'] = $update['new'];
+                            break;
+                        }
+                    }
+                }
+            }
+            $tableJson = addslashes(json_encode($updatedTable, JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT));
+            $server->executeCommand("docker exec -i {$containerArg} sh -c 'echo \"$tableJson\" > {$configDir}/clientsTable'", true);
+            
+            // Restart WireGuard interface to apply changes
+            $server->executeCommand("docker exec -i {$containerArg} wg-quick down {$configDir}/{$configFile} 2>/dev/null || true", true);
+            $server->executeCommand("docker exec -i {$containerArg} wg-quick up {$configDir}/{$configFile} 2>/dev/null || true", true);
+            
+            Logger::appendInstall($serverId, "Restore: server config updated, WireGuard restarted");
+        }
+        
         Logger::appendInstall($serverId, "Restore: finished, restored={$restored}");
         return [
             'success' => true,
             'mode' => 'restore',
-            'message' => 'Существующая конфигурация восстановлена',
+            'message' => 'Существующая конфигурация восстановлена' . ($needsServerConfigUpdate ? ' (ключи клиентов обновлены)' : ''),
             'vpn_port' => $details['vpn_port'] ?? null,
             'clients_count' => $details['clients_count'] ?? null,
             'restored_clients' => $restored

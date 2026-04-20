@@ -69,7 +69,7 @@ class QrUtil
         }
         $uncompressedLen = strlen($json);
         $compressedLen = strlen($compressed) + 4; // +4 for the uncompressed length field
-        $version = 0x07C00100; // Amnezia magic version number
+        $version = 0x07C00100; // Amnezia magic version number for compressed format
         $header = pack('N3', $version, $compressedLen, $uncompressedLen);
         return self::urlsafe_b64_encode($header . $compressed);
     }
@@ -88,20 +88,65 @@ class QrUtil
     }
 
     /**
+     * Generate QR code payload in vpn:// URL format for AWG2
+     * Returns vpn://<base64url(header + compressed config)>
+     */
+    public static function encodeVpnUrlPayload(string $confText, string $protocolSlug = ''): string
+    {
+        if ($protocolSlug === 'awg2') {
+            return self::encodeVpnUrlConf($confText);
+        }
+        
+        // For other protocols, use old format with vpn:// prefix
+        $payload = self::buildOldEnvelopeFromConf($confText, $protocolSlug);
+        $jsonPayload = json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+        return 'vpn://' . self::encodeOldPayloadFromJson($jsonPayload);
+    }
+
+    /**
      * Encode config in simple format used by real Amnezia app for AWG2:
      * Header (8 bytes): version (4) + length (4) + config text
      * No compression, no JSON wrapper
-     *
-     * Note: In real app, bytes 8-11 contain first 4 bytes of config text,
-     * not a separate field. So header is only 8 bytes.
      */
     private static function encodeSimpleConf(string $confText): string
     {
-        $version = 0x07C00100; // Amnezia magic version number
+        $version = 0x07C00200; // Amnezia magic version number (updated for newer app compatibility)
         $length = strlen($confText);
         
         $header = pack('N2', $version, $length);
         return self::urlsafe_b64_encode($header . $confText);
+    }
+
+    /**
+     * Encode config in vpn:// URL format used by newer Amnezia app
+     * Format: vpn://<base64url(header + compressed config)>
+     * Header: version (4 bytes) + uncompressed length (4 bytes)
+     * Payload: gzipped config text
+     */
+    private static function encodeVpnUrlConf(string $confText): string
+    {
+        // Based on real Amnezia app format - no compression, just header + config
+        $version = 0x07C00200; // Amnezia magic version number
+        $length = strlen($confText);
+        
+        // Header: version (4 bytes big-endian) + length (4 bytes big-endian)
+        $header = pack('N2', $version, $length);
+        $payload = $header . $confText;
+        
+        // Return just the base64url encoded payload (vpn:// prefix added by caller if needed)
+        return self::urlsafe_b64_encode($payload);
+    }
+
+    /**
+     * Encode config in old compressed format (for second QR code)
+     * Uses JSON envelope with gzip compression
+     * Header: version (4) + compressedLen+4 (4) + uncompressedLen (4) + compressed data
+     */
+    public static function encodeCompressedConf(string $confText, string $protocolSlug = ''): string
+    {
+        $payload = self::buildOldEnvelopeFromConf($confText, $protocolSlug);
+        $jsonPayload = json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+        return self::encodeOldPayloadFromJson($jsonPayload);
     }
 
     private static function resolveServerDescription(?string $endpointHost): string

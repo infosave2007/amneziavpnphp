@@ -1134,6 +1134,9 @@ Router::get('/clients/{id}', function ($params) {
         $server = new VpnServer((int) $clientData['server_id']);
         $serverData = $server->getData();
         $protocolOutput = '';
+        $qrCodeVpnUrl = '';
+        $vpnUrlConfig = '';
+        $isAwg2 = false;
         try {
             $pdo = DB::conn();
             $protocol = null;
@@ -1149,22 +1152,43 @@ Router::get('/clients/{id}', function ($params) {
 
             if ($protocol) {
                 $clientData['show_text_content'] = !empty($protocol['show_text_content']);
+                $protocolSlug = $protocol['slug'] ?? '';
+                $isAwg2 = ($protocolSlug === 'awg2');
             }
             if ($protocol && ($protocol['output_template'] ?? '') !== '') {
                 $slug = $protocol['slug'] ?? '';
                 $isWireguard = in_array($slug, ['amnezia-wg-advanced', 'wireguard-standard', 'amnezia-wg', 'awg2'], true);
                 if ($isWireguard) {
-                    // For WG, we don’t render protocol_output; config is downloadable
+                    // For WG, we don't render protocol_output; config is downloadable
                     $protocolOutput = '';
                 } else {
                     // For non-WG protocols, reuse stored generated output in config
                     $protocolOutput = $clientData['config'] ?? '';
                 }
             }
+            
+            // Generate second QR code and vpn:// config for AWG2
+            if ($isAwg2 && !empty($clientData['config'])) {
+                try {
+                    $qrCodeVpnUrl = VpnClient::generateQRCodeVpnUrl($clientData['config'], 'awg2');
+                    
+                    // Generate vpn:// URL string (add vpn:// prefix)
+                    require_once __DIR__ . '/../inc/QrUtil.php';
+                    $vpnUrlConfig = 'vpn://' . QrUtil::encodeVpnUrlPayload($clientData['config'], 'awg2');
+                } catch (Exception $e) {
+                    // Ignore errors, just don't show the second QR
+                }
+            }
         } catch (Exception $e) {
             $protocolOutput = '';
         }
-        View::render('clients/view.twig', ['client' => $clientData, 'protocol_output' => $protocolOutput]);
+        View::render('clients/view.twig', [
+            'client' => $clientData,
+            'protocol_output' => $protocolOutput,
+            'qr_code_vpn_url' => $qrCodeVpnUrl,
+            'vpn_url_config' => $vpnUrlConfig,
+            'is_awg2' => $isAwg2
+        ]);
     } catch (Exception $e) {
         http_response_code(404);
         echo 'Client not found';

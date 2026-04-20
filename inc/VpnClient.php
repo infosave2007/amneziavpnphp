@@ -997,7 +997,7 @@ class VpnClient
     /**
      * Build client configuration file
      */
-    private static function buildClientConfig(
+    public static function buildClientConfig(
         string $privateKey,
         string $clientIP,
         string $serverPublicKey,
@@ -1066,7 +1066,7 @@ class VpnClient
         $config .= "PresharedKey = {$presharedKey}\n";
         $config .= "Endpoint = {$serverHost}:{$serverPort}\n";
         $config .= "AllowedIPs = 0.0.0.0/0, ::/0\n";
-        $config .= "PersistentKeepalive = 25\n";
+        $config .= "PersistentKeepalive = 25\n\n";
 
         return $config;
     }
@@ -1209,7 +1209,7 @@ class VpnClient
      * Generate QR code for configuration using Amnezia format
      * Uses working QrUtil from /Users/oleg/Documents/amnezia
      */
-    private static function generateQRCode(string $config, string $protocolSlug = ''): string
+    public static function generateQRCode(string $config, string $protocolSlug = ''): string
     {
         require_once __DIR__ . '/QrUtil.php';
 
@@ -1252,6 +1252,37 @@ class VpnClient
         } catch (Throwable $e) {
             error_log('Failed to generate QR code: ' . $e->getMessage());
             return ''; // QR code generation failed, but continue
+        }
+    }
+
+    /**
+     * Generate second QR code in vpn:// URL format
+     * Used for newer Amnezia app versions that support vpn:// scheme
+     */
+    public static function generateQRCodeVpnUrl(string $config, string $protocolSlug = ''): string
+    {
+        require_once __DIR__ . '/QrUtil.php';
+
+        try {
+            // For X-Ray VLESS, use same format as regular QR
+            if (strpos($config, 'vless://') === 0) {
+                return self::generateQRCode($config, $protocolSlug);
+            }
+
+            // For AWG2, use compressed format (second QR code format)
+            if ($protocolSlug === 'awg2') {
+                $payloadCompressed = QrUtil::encodeCompressedConf($config, $protocolSlug);
+                $dataUri = QrUtil::pngBase64($payloadCompressed);
+                return $dataUri;
+            }
+
+            // For other WireGuard/AWG, use vpn:// URL format
+            $payloadVpn = QrUtil::encodeVpnUrlPayload($config, $protocolSlug);
+            $dataUri = QrUtil::pngBase64($payloadVpn);
+            return $dataUri;
+        } catch (Throwable $e) {
+            error_log('Failed to generate vpn:// QR code: ' . $e->getMessage());
+            return '';
         }
     }
 
