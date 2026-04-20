@@ -1269,15 +1269,8 @@ class VpnClient
                 return self::generateQRCode($config, $protocolSlug);
             }
 
-            // For AWG2, use compressed format (second QR code format)
-            if ($protocolSlug === 'awg2') {
-                $payloadCompressed = QrUtil::encodeCompressedConf($config, $protocolSlug);
-                $dataUri = QrUtil::pngBase64($payloadCompressed);
-                return $dataUri;
-            }
-
-            // For other WireGuard/AWG, use vpn:// URL format
-            $payloadVpn = QrUtil::encodeVpnUrlPayload($config, $protocolSlug);
+            // For AWG2 and other WireGuard/AWG, use vpn:// URL format with JSON + zlib
+            $payloadVpn = QrUtil::encodeVpnUrlConf($config, $protocolSlug);
             $dataUri = QrUtil::pngBase64($payloadVpn);
             return $dataUri;
         } catch (Throwable $e) {

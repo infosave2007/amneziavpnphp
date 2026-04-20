@@ -1172,9 +1172,9 @@ Router::get('/clients/{id}', function ($params) {
                 try {
                     $qrCodeVpnUrl = VpnClient::generateQRCodeVpnUrl($clientData['config'], 'awg2');
                     
-                    // Generate vpn:// URL string (add vpn:// prefix)
+                    // Generate vpn:// URL string using vpn:// format (JSON + zlib)
                     require_once __DIR__ . '/../inc/QrUtil.php';
-                    $vpnUrlConfig = 'vpn://' . QrUtil::encodeVpnUrlPayload($clientData['config'], 'awg2');
+                    $vpnUrlConfig = 'vpn://' . QrUtil::encodeVpnUrlConf($clientData['config'], 'awg2');
                 } catch (Exception $e) {
                     // Ignore errors, just don't show the second QR
                 }

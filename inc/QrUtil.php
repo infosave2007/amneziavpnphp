@@ -108,7 +108,7 @@ class QrUtil
      * Header (8 bytes): version (4) + length (4) + config text
      * No compression, no JSON wrapper
      */
-    private static function encodeSimpleConf(string $confText): string
+    public static function encodeSimpleConf(string $confText): string
     {
         $version = 0x07C00200; // Amnezia magic version number (updated for newer app compatibility)
         $length = strlen($confText);
@@ -119,21 +119,38 @@ class QrUtil
 
     /**
      * Encode config in vpn:// URL format used by newer Amnezia app
-     * Format: vpn://<base64url(header + compressed config)>
-     * Header: version (4 bytes) + uncompressed length (4 bytes)
-     * Payload: gzipped config text
+     * Format: vpn://<base64url(uint32 BE uncompressed_len + zlib compressed JSON)>
+     *
+     * Structure:
+     * - 4 bytes: uint32 BE — length of JSON after decompression
+     * - N bytes: zlib-compressed JSON (level 9, magic 0x78 0xDA)
+     * - Entire block encoded in Base64url without padding
      */
-    private static function encodeVpnUrlConf(string $confText): string
+    public static function encodeVpnUrlConf(string $confText, string $protocolSlug = ''): string
     {
-        // Based on real Amnezia app format - no compression, just header + config
-        $version = 0x07C00200; // Amnezia magic version number
-        $length = strlen($confText);
+        // Build JSON envelope like the real Amnezia app
+        $envelope = self::buildOldEnvelopeFromConf($confText, $protocolSlug);
+        $jsonBytes = json_encode($envelope, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+        if ($jsonBytes === false) {
+            throw new RuntimeException('json_encode failed');
+        }
         
-        // Header: version (4 bytes big-endian) + length (4 bytes big-endian)
-        $header = pack('N2', $version, $length);
-        $payload = $header . $confText;
+        $jsonBytes = (string) $jsonBytes;
+        $uncompressedLength = strlen($jsonBytes);
         
-        // Return just the base64url encoded payload (vpn:// prefix added by caller if needed)
+        // Compress with zlib level 9 (produces 0x78 0xDA header)
+        $compressed = gzcompress($jsonBytes, 9);
+        if ($compressed === false) {
+            throw new RuntimeException('gzcompress failed');
+        }
+        
+        // Header: uint32 BE with uncompressed length
+        $header = pack('N', $uncompressedLength);
+        
+        // Payload: header + compressed data
+        $payload = $header . $compressed;
+        
+        // Base64url encode without padding
         return self::urlsafe_b64_encode($payload);
     }
 
@@ -147,6 +164,29 @@ class QrUtil
         $payload = self::buildOldEnvelopeFromConf($confText, $protocolSlug);
         $jsonPayload = json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
         return self::encodeOldPayloadFromJson($jsonPayload);
+    }
+
+    /**
+     * Encode config in Amnezia app format for vpn:// URL
+     * Format: 3-byte length (big-endian) + zlib compressed JSON data
+     * This matches the real Amnezia app vpn:// URL format
+     */
+    public static function encodeAmneziaVpnUrl(string $confText, string $protocolSlug = ''): string
+    {
+        // Build JSON envelope like the real Amnezia app
+        $payload = self::buildOldEnvelopeFromConf($confText, $protocolSlug);
+        $jsonPayload = json_encode($payload, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+        
+        // Compress the JSON
+        $compressed = gzcompress($jsonPayload, 9);
+        if ($compressed === false) {
+            throw new RuntimeException('gzcompress failed');
+        }
+        $length = strlen($compressed);
+        // 3-byte length in big-endian
+        $lengthBytes = pack('N', $length);
+        $header = substr($lengthBytes, 1); // Take last 3 bytes
+        return self::urlsafe_b64_encode($header . $compressed);
     }
 
     private static function resolveServerDescription(?string $endpointHost): string
