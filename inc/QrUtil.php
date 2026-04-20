@@ -533,6 +533,8 @@ class QrUtil
                         'I5' => (string) ($params['I5'] ?? ''),
                         'S3' => (string) ($params['S3'] ?? ''),
                         'S4' => (string) ($params['S4'] ?? ''),
+                        'protocol_version' => '2',
+                        'subnet_address' => (string) ($address ? (preg_match('/^(\d+\.\d+\.\d+)\.\d+/', $address, $m) ? $m[1] . '.0' : '10.8.1.0') : '10.8.1.0'),
                     ] : []),
                     'container' => $protocolSlug === 'awg2' ? 'amnezia-awg2' : 'amnezia-awg',
                 ],
