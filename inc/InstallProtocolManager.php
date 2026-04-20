@@ -552,7 +552,8 @@ class InstallProtocolManager
                 awg_params = ?,
                 status = ?,
                 error_message = NULL,
-                deployed_at = COALESCE(deployed_at, NOW())
+                deployed_at = COALESCE(deployed_at, NOW()),
+                install_protocol = ?
             WHERE id = ?
         ');
         $stmt->execute([
@@ -561,8 +562,23 @@ class InstallProtocolManager
             $details['preshared_key'] ?? null,
             isset($details['awg_params']) ? json_encode($details['awg_params']) : null,
             'active',
+            $protocol['slug'] ?? ($isAwg2 ? 'awg2' : 'amnezia-wg'),
             $server->getId()
         ]);
+        
+        // Add entry to server_protocols table so protocol shows in installed list
+        $protocolId = self::resolveProtocolId($protocol);
+        if ($protocolId) {
+            $stmt = $pdo->prepare('
+                INSERT INTO server_protocols (server_id, protocol_id, applied_at)
+                VALUES (?, ?, NOW())
+                ON DUPLICATE KEY UPDATE applied_at = NOW()
+            ');
+            $stmt->execute([
+                $server->getId(),
+                $protocolId
+            ]);
+        }
 
         $server->refresh();
         $serverData = $server->getData();
