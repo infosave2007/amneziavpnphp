@@ -1077,6 +1077,11 @@ class VpnClient
     public static function addClientToServer(array $serverData, string $publicKey, string $clientIP): void
     {
         $containerName = $serverData['container_name'];
+        $protocolSlug = (string) ($serverData['install_protocol'] ?? '');
+        // Для AWG2 конфигурация внутри контейнера находится в /opt/amnezia/awg/awg0.conf
+        $isAwg2 = (stripos($containerName, 'awg2') !== false || $protocolSlug === 'awg2');
+        $configDir = '/opt/amnezia/awg'; // Внутри контейнера всегда /opt/amnezia/awg
+        $configFile = $isAwg2 ? 'awg0.conf' : 'wg0.conf';
         $presharedKey = $serverData['preshared_key'];
         $publicKey = trim($publicKey);
 
@@ -1111,7 +1116,8 @@ class VpnClient
         $peerBlock .= "AllowedIPs = {$clientIP}/32\n";
 
         $escapedBlock = addslashes($peerBlock);
-        $cmd4 = sprintf("docker exec -i %s sh -c 'echo \"%s\" >> /opt/amnezia/awg/wg0.conf'", $containerName, $escapedBlock);
+        $configFile = (stripos($containerName, 'awg2') !== false || $protocolSlug === 'awg2') ? 'awg0.conf' : 'wg0.conf';
+        $cmd4 = sprintf("docker exec -i %s sh -c 'echo \"%s\" >> %s/%s'", $containerName, $escapedBlock, $configDir, $configFile);
         self::executeServerCommand($serverData, $cmd4, true);
 
         // 5. Update clientsTable
@@ -1119,7 +1125,7 @@ class VpnClient
 
         // 6. CRITICAL: Reload WG interface to apply AWG obfuscation params
         // Without this, the interface uses standard WireGuard without Jc/S1/S2/H1-H4
-        $cmd5 = sprintf("docker exec -i %s sh -c 'ip link del wg0 2>/dev/null || true; wg-quick up /opt/amnezia/awg/wg0.conf 2>&1'", $containerName);
+        $cmd5 = sprintf("docker exec -i %s sh -c 'ip link del wg0 2>/dev/null || true; wg-quick up %s/%s 2>&1'", $containerName, $configDir, $configFile);
         self::executeServerCommand($serverData, $cmd5, true);
     }
 
@@ -1129,9 +1135,12 @@ class VpnClient
     private static function updateClientsTable(array $serverData, string $publicKey, string $name): void
     {
         $containerName = $serverData['container_name'];
+        $protocolSlug = (string) ($serverData['install_protocol'] ?? '');
+        // Для AWG2 конфигурация внутри контейнера находится в /opt/amnezia/awg/
+        $configDir = '/opt/amnezia/awg'; // Внутри контейнера всегда /opt/amnezia/awg
 
         // Read current table
-        $cmd = sprintf("docker exec -i %s cat /opt/amnezia/awg/clientsTable 2>/dev/null", $containerName);
+        $cmd = sprintf("docker exec -i %s cat %s/clientsTable 2>/dev/null", $containerName, $configDir);
         $tableJson = self::executeServerCommand($serverData, $cmd, true);
         $table = json_decode(trim($tableJson), true);
 
@@ -1151,7 +1160,7 @@ class VpnClient
         // Save back
         $newTableJson = json_encode($table, JSON_PRETTY_PRINT);
         $escaped = addslashes($newTableJson);
-        $updateCmd = sprintf("docker exec -i %s sh -c 'echo \"%s\" > /opt/amnezia/awg/clientsTable'", $containerName, $escaped);
+        $updateCmd = sprintf("docker exec -i %s sh -c 'echo \"%s\" > %s/clientsTable'", $containerName, $escaped, $configDir);
         self::executeServerCommand($serverData, $updateCmd, true);
     }
 
@@ -1378,6 +1387,12 @@ class VpnClient
     private static function removeClientFromServer(array $serverData, string $publicKey): void
     {
         $containerName = $serverData['container_name'];
+        $protocolSlug = (string) ($serverData['install_protocol'] ?? '');
+        // Для AWG2 конфигурация внутри контейнера находится в /opt/amnezia/awg/
+        $configDir = '/opt/amnezia/awg'; // Внутри контейнера всегда /opt/amnezia/awg
+
+        // Determine config filename
+        $configFile = (stripos($containerName, 'awg2') !== false || $protocolSlug === 'awg2') ? 'awg0.conf' : 'wg0.conf';
 
         // First, remove using wg command (live removal)
         $removeCmd = sprintf(
@@ -1388,9 +1403,9 @@ class VpnClient
 
         self::executeServerCommand($serverData, $removeCmd, true);
 
-        // Then remove from wg0.conf file to make it persistent
+        // Then remove from config file to make it persistent
         // Use a more reliable method: read, filter, write
-        $readCmd = sprintf("docker exec -i %s cat /opt/amnezia/awg/wg0.conf", $containerName);
+        $readCmd = sprintf("docker exec -i %s cat %s/%s", $containerName, $configDir, $configFile);
         $config = self::executeServerCommand($serverData, $readCmd, true);
 
         // Parse and remove the peer section
@@ -1399,9 +1414,11 @@ class VpnClient
         // Write back to file
         $escapedConfig = str_replace("'", "'\\''", $newConfig);
         $writeCmd = sprintf(
-            "docker exec -i %s sh -c 'echo '\''%s'\'' > /opt/amnezia/awg/wg0.conf'",
+            "docker exec -i %s sh -c 'echo '\''%s'\'' > %s/%s'",
             $containerName,
-            $escapedConfig
+            $escapedConfig,
+            $configDir,
+            $configFile
         );
 
         self::executeServerCommand($serverData, $writeCmd, true);
@@ -1466,9 +1483,12 @@ class VpnClient
     private static function removeFromClientsTable(array $serverData, string $publicKey): void
     {
         $containerName = $serverData['container_name'];
+        $protocolSlug = (string) ($serverData['install_protocol'] ?? '');
+        // Для AWG2 конфигурация внутри контейнера находится в /opt/amnezia/awg/
+        $configDir = '/opt/amnezia/awg'; // Внутри контейнера всегда /opt/amnezia/awg
 
         // Read current table
-        $cmd = sprintf("docker exec -i %s cat /opt/amnezia/awg/clientsTable 2>/dev/null", $containerName);
+        $cmd = sprintf("docker exec -i %s cat %s/clientsTable 2>/dev/null", $containerName, $configDir);
         $tableJson = self::executeServerCommand($serverData, $cmd, true);
         $table = json_decode(trim($tableJson), true);
 
@@ -1487,7 +1507,7 @@ class VpnClient
         // Save back
         $newTableJson = json_encode($table, JSON_PRETTY_PRINT);
         $escaped = addslashes($newTableJson);
-        $updateCmd = sprintf("docker exec -i %s sh -c 'echo \"%s\" > /opt/amnezia/awg/clientsTable'", $containerName, $escaped);
+        $updateCmd = sprintf("docker exec -i %s sh -c 'echo \"%s\" > %s/clientsTable'", $containerName, $escaped, $configDir);
         self::executeServerCommand($serverData, $updateCmd, true);
     }
 

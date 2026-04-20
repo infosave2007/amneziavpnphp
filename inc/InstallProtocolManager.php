@@ -431,6 +431,12 @@ class InstallProtocolManager
         $containerFilter = escapeshellarg('^' . $containerName . '$');
         $containerArg = escapeshellarg($containerName);
 
+        // Для AWG2 конфигурация внутри контейнера находится в /opt/amnezia/awg/awg0.conf
+        // На хосте может быть /opt/amnezia/awg2/wg0.conf (монтируется как /opt/amnezia/awg внутри контейнера)
+        $isAwg2 = (stripos($containerName, 'awg2') !== false || ($protocol['slug'] ?? '') === 'awg2');
+        $configDir = $isAwg2 ? '/opt/amnezia/awg' : '/opt/amnezia/awg';
+        $configFile = $isAwg2 ? 'awg0.conf' : 'wg0.conf';
+
         $containerListRaw = trim($server->executeCommand("docker ps -a --filter name={$containerFilter} --format '{{.Names}}'", true));
         if ($containerListRaw === '') {
             return [
@@ -460,11 +466,13 @@ class InstallProtocolManager
 
         $containerState = trim($server->executeCommand("docker inspect --format '{{.State.Status}}' {$containerArg}", true));
 
-        $wgConfig = $server->executeCommand("docker exec -i {$containerArg} cat /opt/amnezia/awg/wg0.conf 2>/dev/null", true);
+        // Для AWG2 проверяем оба возможных имени файла конфигурации
+        $configFile = ($protocol['slug'] ?? '') === 'awg2' ? 'awg0.conf' : 'wg0.conf';
+        $wgConfig = $server->executeCommand("docker exec -i {$containerArg} cat {$configDir}/{$configFile} 2>/dev/null", true);
         if (trim($wgConfig) === '') {
             return [
                 'status' => 'partial',
-                'message' => 'Контейнер найден, но конфигурация wg0.conf отсутствует',
+                'message' => "Контейнер найден, но конфигурация {$configFile} отсутствует",
                 'details' => [
                     'container_name' => $containerName,
                     'container_status' => $containerState,
@@ -484,8 +492,8 @@ class InstallProtocolManager
             ];
         }
 
-        $publicKey = trim($server->executeCommand("docker exec -i {$containerArg} cat /opt/amnezia/awg/wireguard_server_public_key.key 2>/dev/null", true));
-        $presharedKey = trim($server->executeCommand("docker exec -i {$containerArg} cat /opt/amnezia/awg/wireguard_psk.key 2>/dev/null", true));
+        $publicKey = trim($server->executeCommand("docker exec -i {$containerArg} cat {$configDir}/wireguard_server_public_key.key 2>/dev/null", true));
+        $presharedKey = trim($server->executeCommand("docker exec -i {$containerArg} cat {$configDir}/wireguard_psk.key 2>/dev/null", true));
 
         if ($publicKey === '' || $presharedKey === '') {
             return [
@@ -498,7 +506,7 @@ class InstallProtocolManager
             ];
         }
 
-        $clientsRaw = $server->executeCommand("docker exec -i {$containerArg} cat /opt/amnezia/awg/clientsTable 2>/dev/null", true);
+        $clientsRaw = $server->executeCommand("docker exec -i {$containerArg} cat {$configDir}/clientsTable 2>/dev/null", true);
         $clients = json_decode(trim($clientsRaw), true);
         $clientsCount = is_array($clients) ? count($clients) : 0;
 
@@ -524,10 +532,16 @@ class InstallProtocolManager
         $containerName = $details['container_name'] ?? ($protocol['definition']['metadata']['container_name'] ?? 'amnezia-awg');
         $containerArg = escapeshellarg($containerName);
 
+        // Для AWG2 конфигурация внутри контейнера находится в /opt/amnezia/awg/awg0.conf
+        // На хосте может быть /opt/amnezia/awg2/wg0.conf (монтируется как /opt/amnezia/awg внутри контейнера)
+        $isAwg2 = (stripos($containerName, 'awg2') !== false || ($protocol['slug'] ?? '') === 'awg2');
+        $configDir = '/opt/amnezia/awg'; // Внутри контейнера всегда /opt/amnezia/awg
+        $configFile = $isAwg2 ? 'awg0.conf' : 'wg0.conf';
+
         // Try to ensure container is running and wg is up
         $server->executeCommand("docker start {$containerArg} 2>/dev/null || true", true);
-        $server->executeCommand("docker exec -i {$containerArg} wg-quick down /opt/amnezia/awg/wg0.conf 2>/dev/null || true", true);
-        $server->executeCommand("docker exec -i {$containerArg} wg-quick up /opt/amnezia/awg/wg0.conf 2>/dev/null || true", true);
+        $server->executeCommand("docker exec -i {$containerArg} wg-quick down {$configDir}/{$configFile} 2>/dev/null || true", true);
+        $server->executeCommand("docker exec -i {$containerArg} wg-quick up {$configDir}/{$configFile} 2>/dev/null || true", true);
 
         $pdo = DB::conn();
         $stmt = $pdo->prepare('
@@ -553,9 +567,12 @@ class InstallProtocolManager
         $server->refresh();
         $serverData = $server->getData();
 
-        // Import existing peers from wg0.conf into database as disabled clients
-        $wgConfig = $server->executeCommand("docker exec -i {$containerArg} cat /opt/amnezia/awg/wg0.conf 2>/dev/null", true);
-        $tableRaw = $server->executeCommand("docker exec -i {$containerArg} cat /opt/amnezia/awg/clientsTable 2>/dev/null", true);
+        // Import existing peers from config into database as disabled clients
+        $serverId = $server->getId();
+        Logger::appendInstall($serverId, "Restore: configDir={$configDir}, configFile={$configFile}, containerArg={$containerArg}");
+        $wgConfig = $server->executeCommand("docker exec -i {$containerArg} cat {$configDir}/{$configFile} 2>/dev/null", true);
+        $tableRaw = $server->executeCommand("docker exec -i {$containerArg} cat {$configDir}/clientsTable 2>/dev/null", true);
+        Logger::appendInstall($serverId, "Restore: wgConfig length=" . strlen($wgConfig) . ", tableRaw length=" . strlen($tableRaw));
         $clientsTable = json_decode(trim($tableRaw), true);
         $nameByPub = [];
         if (is_array($clientsTable)) {
@@ -569,6 +586,7 @@ class InstallProtocolManager
         }
         $restored = 0;
         $pid = self::resolveProtocolId($protocol);
+        Logger::appendInstall($serverId, "Restore: protocol_id={$pid}, wgConfig empty=" . (trim($wgConfig) === '' ? 'yes' : 'no'));
         if (trim($wgConfig) !== '') {
             $pattern = '/\[Peer\][^\[]*?PublicKey\s*=\s*(.+?)\s*[\r\n]+[\s\S]*?AllowedIPs\s*=\s*(.+?)(?:\r?\n|$)/';
             if (preg_match_all($pattern, $wgConfig, $matches, PREG_SET_ORDER)) {
@@ -611,6 +629,7 @@ class InstallProtocolManager
             }
         }
 
+        Logger::appendInstall($serverId, "Restore: finished, restored={$restored}");
         return [
             'success' => true,
             'mode' => 'restore',
@@ -1836,10 +1855,13 @@ class InstallProtocolManager
             return;
         }
 
-        $containerName = $server->getData()['container_name'] ?? 'amnezia-awg';
-
-        // Read existing config
-        $conf = $server->executeCommand("docker exec -i $containerName cat /opt/amnezia/awg/wg0.conf", true);
+        $serverData = $server->getData();
+        $containerName = $serverData['container_name'] ?? 'amnezia-awg';
+        // Для AWG2 конфигурация внутри контейнера находится в /opt/amnezia/awg/awg0.conf
+        $isAwg2 = (stripos($containerName, 'awg2') !== false || ($protocol['slug'] ?? '') === 'awg2');
+        $configDir = '/opt/amnezia/awg'; // Внутри контейнера всегда /opt/amnezia/awg
+        $configFile = $isAwg2 ? 'awg0.conf' : 'wg0.conf';
+        $conf = $server->executeCommand("docker exec -i $containerName cat {$configDir}/{$configFile}", true);
         if (!$conf)
             return;
 
@@ -1869,7 +1891,7 @@ class InstallProtocolManager
             Logger::appendInstall($serverId, "Syncing $count existing clients to server config");
             $conf .= $newPeersBlock;
             $escaped = addslashes($conf);
-            $server->executeCommand("docker exec -i $containerName sh -c 'echo \"$escaped\" > /opt/amnezia/awg/wg0.conf'", true);
+            $server->executeCommand("docker exec -i $containerName sh -c 'echo \"$escaped\" > {$configDir}/{$configFile}'", true);
 
             // Reload interface
             $server->executeCommand("docker exec -i $containerName wg-quick down wg0 || true", true);
@@ -2185,9 +2207,12 @@ class InstallProtocolManager
         $serverData = $server->getData();
         $pid = self::resolveProtocolId($protocol);
 
-        // Read wg0.conf and clientsTable
-        $wgConfig = $server->executeCommand("docker exec -i {$containerArg} cat /opt/amnezia/awg/wg0.conf 2>/dev/null", true);
-        $tableRaw = $server->executeCommand("docker exec -i {$containerArg} cat /opt/amnezia/awg/clientsTable 2>/dev/null", true);
+        // Для AWG2 конфигурация внутри контейнера находится в /opt/amnezia/awg/awg0.conf
+        $isAwg2 = (stripos($containerName, 'awg2') !== false || ($protocol['slug'] ?? '') === 'awg2');
+        $configDir = '/opt/amnezia/awg'; // Внутри контейнера всегда /opt/amnezia/awg
+        $configFile = $isAwg2 ? 'awg0.conf' : 'wg0.conf';
+        $wgConfig = $server->executeCommand("docker exec -i {$containerArg} cat {$configDir}/{$configFile} 2>/dev/null", true);
+        $tableRaw = $server->executeCommand("docker exec -i {$containerArg} cat {$configDir}/clientsTable 2>/dev/null", true);
         $clientsTable = json_decode(trim($tableRaw), true);
 
         // Build name lookup
