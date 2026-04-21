@@ -811,7 +811,7 @@ class InstallProtocolManager
             }
         }
 
-        $wrapper = "bash <<'EOS'\nset -euo pipefail\n" . $exportLines . $script . "\nEOS";
+        $wrapper = "bash <<'EOS'\nset -eo pipefail\n" . $exportLines . $script . "\nEOS";
         Logger::appendInstall($server->getId(), strtoupper($phase) . ' phase: executing remote script');
         $output = $server->executeCommand($wrapper, true);
         Logger::appendInstall($server->getId(), strtoupper($phase) . ' phase: output size ' . strlen((string) $output) . ' bytes');
@@ -1600,6 +1600,10 @@ class InstallProtocolManager
                 $stmt2 = $pdo->prepare('INSERT INTO server_protocols (server_id, protocol_id, config_data, applied_at, created_at) VALUES (?, ?, ?, NOW(), NOW()) ON DUPLICATE KEY UPDATE config_data = VALUES(config_data), applied_at = NOW()');
                 $stmt2->execute([$serverId, $pid, json_encode($config)]);
             }
+            // Save vpn_port to vpn_servers table for shell protocols (like AIVPN)
+            if ($port !== null && $port > 0) {
+                self::markServerActive($serverId, null, ['vpn_port' => $port]);
+            }
             return $res;
         } catch (Throwable $e) {
             $message = (string) $e->getMessage();
@@ -1661,12 +1665,41 @@ class InstallProtocolManager
             $serverPort = 443;
         }
 
+        // Use full path to aivpn-server binary as per official Dockerfile
+        // The binary is installed to /usr/local/bin/aivpn-server in the container
+        $binaryCmd = '/usr/local/bin/aivpn-server';
+        
+        // Verify the binary exists, fallback to other locations if needed
+        $checkCmd = sprintf('docker exec -i %s test -f %s && echo "found" || echo "not found"',
+            escapeshellarg($containerName),
+            escapeshellarg($binaryCmd));
+        $checkResult = (string) $server->executeCommand($checkCmd, true);
+        if (strpos($checkResult, 'found') === false) {
+            // Try alternative locations
+            $fallbacks = [
+                'aivpn-server',  // In PATH
+                '/usr/bin/aivpn-server',
+                '/opt/aivpn/aivpn-server',
+                '/app/aivpn-server',
+            ];
+            foreach ($fallbacks as $loc) {
+                $checkCmd = sprintf('docker exec -i %s test -f %s && echo "found" || echo "not found"',
+                    escapeshellarg($containerName),
+                    escapeshellarg($loc));
+                $checkResult = (string) $server->executeCommand($checkCmd, true);
+                if (strpos($checkResult, 'found') !== false) {
+                    $binaryCmd = $loc;
+                    break;
+                }
+            }
+        }
+        
         $cmdParts = [
             'docker',
             'exec',
             '-i',
             escapeshellarg($containerName),
-            'aivpn-server',
+            $binaryCmd,
             '--add-client',
             escapeshellarg($clientName),
             '--key-file',
@@ -1682,11 +1715,39 @@ class InstallProtocolManager
 
         $cmd = implode(' ', $cmdParts);
         Logger::appendInstall($server->getId(), 'Adding AIVPN client via builtin add_client: ' . $clientName . ' in ' . $containerName);
-        $output = (string) $server->executeCommand($cmd, true);
+        
+        try {
+                    $output = (string) $server->executeCommand($cmd, true);
+                } catch (Exception $e) {
+                    // Container may be restarting or unavailable - try host binary fallback
+                    Logger::appendInstall($server->getId(), 'AIVPN add_client docker exec failed (container may be restarting): ' . $e->getMessage());
+                    $hostResult = self::runAivpnAddClientViaHostBinary($server, $clientName, $serverHost, $serverPort);
+                    if ($hostResult !== null) {
+                        return $hostResult;
+                    }
+                    return ['success' => true, 'connection_key' => '', 'connection_uri' => ''];
+                }
+                
+                // Check if docker exec returned an error (container not running, etc.)
+                $trimmedOutput = trim($output);
+                if ($trimmedOutput === '' ||
+                    stripos($trimmedOutput, 'Error response from daemon') !== false ||
+                    stripos($trimmedOutput, 'is restarting') !== false ||
+                    stripos($trimmedOutput, 'No such container') !== false ||
+                    stripos($trimmedOutput, 'executable file not found') !== false) {
+                    // Container unavailable - try host binary fallback
+                    Logger::appendInstall($server->getId(), 'AIVPN add_client container unavailable, trying host binary fallback');
+                    $hostResult = self::runAivpnAddClientViaHostBinary($server, $clientName, $serverHost, $serverPort);
+                    if ($hostResult !== null) {
+                        return $hostResult;
+                    }
+                    return ['success' => true, 'connection_key' => '', 'connection_uri' => ''];
+                }
+        
         $parsed = self::parseAivpnAddClientOutput($output);
 
         if (empty($parsed['connection_uri']) && empty($parsed['connection_key'])) {
-            $head = substr(str_replace(["\r", "\n"], ' ', trim($output)), 0, 220);
+            $head = substr(str_replace(["\r", "\n"], ' ', $trimmedOutput), 0, 220);
             throw new Exception('AIVPN add_client succeeded but no connection key found in output: ' . $head);
         }
 
@@ -1731,6 +1792,90 @@ class InstallProtocolManager
             $result['client_ip'] = trim((string) $m[1]);
         }
 
+        return $result;
+    }
+
+    private static function runAivpnAddClientViaHostBinary(VpnServer $server, string $clientName, string $serverHost, int $serverPort): ?array
+    {
+        $hostBinaryPaths = [
+            '/opt/amnezia/aivpn/aivpn-server-linux-x86_64',
+            '/opt/amnezia/aivpn/aivpn-server',
+            '/usr/local/bin/aivpn-server',
+            '/usr/bin/aivpn-server',
+        ];
+
+        $binaryPath = null;
+        foreach ($hostBinaryPaths as $path) {
+            try {
+                $check = (string) $server->executeCommand('test -f ' . escapeshellarg($path) . ' && echo "found" || echo "not_found"', true);
+                if (trim($check) === 'found') {
+                    $binaryPath = $path;
+                    break;
+                }
+            } catch (Exception $e) {
+                continue;
+            }
+        }
+
+        if ($binaryPath === null) {
+            Logger::appendInstall($server->getId(), 'AIVPN host binary not found for fallback');
+            return null;
+        }
+
+        $cmdParts = [
+            escapeshellarg($binaryPath),
+            '--add-client',
+            escapeshellarg($clientName),
+            '--key-file',
+            escapeshellarg('/etc/aivpn/server.key'),
+            '--clients-db',
+            escapeshellarg('/etc/aivpn/clients.json'),
+        ];
+
+        if ($serverHost !== '') {
+            $cmdParts[] = '--server-ip';
+            $cmdParts[] = escapeshellarg($serverHost . ':' . $serverPort);
+        }
+
+        $cmd = implode(' ', $cmdParts);
+        Logger::appendInstall($server->getId(), 'AIVPN add_client fallback via host binary: ' . $clientName);
+
+        try {
+            $output = (string) $server->executeCommand($cmd, true);
+        } catch (Exception $e) {
+            Logger::appendInstall($server->getId(), 'AIVPN host binary fallback failed: ' . $e->getMessage());
+            return null;
+        }
+
+        $trimmedOutput = trim($output);
+        if ($trimmedOutput === '' ||
+            stripos($trimmedOutput, 'Failed to add client') !== false ||
+            stripos($trimmedOutput, 'error') !== false) {
+            Logger::appendInstall($server->getId(), 'AIVPN host binary fallback returned error: ' . substr($trimmedOutput, 0, 200));
+            return null;
+        }
+
+        $parsed = self::parseAivpnAddClientOutput($output);
+        if (empty($parsed['connection_uri']) && empty($parsed['connection_key'])) {
+            Logger::appendInstall($server->getId(), 'AIVPN host binary fallback produced no connection key');
+            return null;
+        }
+
+        $result = ['success' => true];
+        if (!empty($parsed['connection_uri'])) {
+            $result['connection_uri'] = $parsed['connection_uri'];
+        }
+        if (!empty($parsed['connection_key'])) {
+            $result['connection_key'] = $parsed['connection_key'];
+        }
+        if (!empty($parsed['client_ip'])) {
+            $result['client_ip'] = $parsed['client_ip'];
+        }
+        if (!empty($parsed['client_id'])) {
+            $result['client_id'] = $parsed['client_id'];
+        }
+
+        Logger::appendInstall($server->getId(), 'AIVPN host binary fallback succeeded for ' . $clientName);
         return $result;
     }
 

@@ -467,20 +467,70 @@ class VpnClient
             }
 
             if ($slug === 'aivpn' && empty($vars['connection_key'])) {
+                // Fallback: try to run host binary directly when container is unavailable
                 try {
-                    $rawKey = trim((string) $server->executeCommand('cat /etc/aivpn/server.key 2>/dev/null', true));
-                    if ($rawKey !== '' && !empty($vars['client_ip']) && !empty($vars['server_host']) && !empty($vars['server_port'])) {
-                        $payload = [
-                            'i' => (string) $vars['client_ip'],
-                            'k' => $rawKey,
-                            'p' => '',
-                            's' => (string) $vars['server_host'] . ':' . (string) $vars['server_port'],
+                    $hostBinaryPaths = [
+                        '/opt/amnezia/aivpn/aivpn-server-linux-x86_64',
+                        '/opt/amnezia/aivpn/aivpn-server',
+                        '/usr/local/bin/aivpn-server',
+                        '/usr/bin/aivpn-server',
+                    ];
+                    $binaryPath = null;
+                    foreach ($hostBinaryPaths as $path) {
+                        try {
+                            $check = trim((string) $server->executeCommand('test -f ' . escapeshellarg($path) . ' && echo "found" || echo "not_found"', true));
+                            if ($check === 'found') {
+                                $binaryPath = $path;
+                                break;
+                            }
+                        } catch (Exception $e) {
+                            continue;
+                        }
+                    }
+
+                    if ($binaryPath !== null) {
+                        $serverHost = !empty($vars['server_host']) ? (string) $vars['server_host'] : ($serverData['host'] ?? '');
+                        $serverPort = !empty($vars['server_port']) ? (int) $vars['server_port'] : (int) ($serverData['vpn_port'] ?? 443);
+                        if ($serverHost === '') {
+                            $serverHost = $serverData['host'] ?? '';
+                        }
+                        if ($serverPort <= 0) {
+                            $serverPort = 443;
+                        }
+
+                        $cmdParts = [
+                            escapeshellarg($binaryPath),
+                            '--add-client',
+                            escapeshellarg($loginFinal),
+                            '--key-file',
+                            escapeshellarg('/etc/aivpn/server.key'),
+                            '--clients-db',
+                            escapeshellarg('/etc/aivpn/clients.json'),
                         ];
-                        $json = (string) json_encode($payload, JSON_UNESCAPED_SLASHES);
-                        $vars['connection_key'] = rtrim(strtr(base64_encode($json), '+/', '-_'), '=');
+                        if ($serverHost !== '') {
+                            $cmdParts[] = '--server-ip';
+                            $cmdParts[] = escapeshellarg($serverHost . ':' . $serverPort);
+                        }
+                        $cmd = implode(' ', $cmdParts);
+                        $output = (string) $server->executeCommand($cmd, true);
+                        $trimmed = trim($output);
+                        if ($trimmed !== '' && stripos($trimmed, 'Failed to add client') === false) {
+                            if (preg_match('/(aivpn:\/\/[A-Za-z0-9_\-+=\/]+)/', $trimmed, $m)) {
+                                $uri = trim((string) $m[1]);
+                                $vars['connection_uri'] = $uri;
+                                if (stripos($uri, 'aivpn://') === 0) {
+                                    $vars['connection_key'] = substr($uri, strlen('aivpn://'));
+                                }
+                            }
+                            if (preg_match('/\bVPN\s*IP:\s*([0-9.]+)/i', $trimmed, $m)) {
+                                $vars['client_ip'] = trim((string) $m[1]);
+                                $clientIP = $vars['client_ip'];
+                            }
+                            error_log('AIVPN host binary fallback succeeded, connection_key length: ' . strlen($vars['connection_key'] ?? ''));
+                        }
                     }
                 } catch (Exception $e) {
-                    // Keep empty: final template output will expose a missing key.
+                    error_log('AIVPN host binary fallback failed: ' . $e->getMessage());
                 }
             }
 
@@ -488,7 +538,12 @@ class VpnClient
                 $vars['connection_key'] = self::normalizeAivpnConnectionKey((string) $vars['connection_key']);
             }
 
-            $config = $protoRow ? ProtocolService::generateProtocolOutput($protoRow, $vars) : '';
+            if ($protoRow) {
+                require_once __DIR__ . '/ProtocolService.php';
+                $config = ProtocolService::generateProtocolOutput($protoRow, $vars);
+            } else {
+                $config = '';
+            }
 
             // Prepare last_config_json for QR code generation if config is JSON (XRay)
             if ($config !== '' && ($decoded = json_decode($config)) !== null) {
