@@ -757,7 +757,7 @@ class VpnClient
             $escaped
         );
 
-        $out = shell_exec($sshCmd);
+        $out = (string) shell_exec($sshCmd);
         $parts = explode("---", trim($out));
 
         if (count($parts) < 2) {
