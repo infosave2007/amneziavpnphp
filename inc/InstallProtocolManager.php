@@ -1517,13 +1517,21 @@ class InstallProtocolManager
                     }
                 }
 
-                self::markServerActive($serverId, null, [
-                    'vpn_port' => $resolvedPort,
-                    'server_public_key' => $res['server_public_key'] ?? null,
-                    'preshared_key' => $res['preshared_key'] ?? null,
-                    'container_name' => $res['container_name'] ?? null,
-                    'awg_params' => $resolvedAwgParams,
-                ]);
+                $existingProtocol = $server->getData()['install_protocol'] ?? '';
+                $currentSlug = $protocol['slug'] ?? '';
+                $isFirstProtocol = ($existingProtocol === '' || $existingProtocol === $currentSlug);
+                if ($isFirstProtocol) {
+                    self::markServerActive($serverId, null, [
+                        'vpn_port' => $resolvedPort,
+                        'server_public_key' => $res['server_public_key'] ?? null,
+                        'preshared_key' => $res['preshared_key'] ?? null,
+                        'container_name' => $res['container_name'] ?? null,
+                        'awg_params' => $resolvedAwgParams,
+                    ]);
+                } else {
+                    // Secondary protocol — just mark active, don't overwrite primary data
+                    self::markServerActive($serverId, null, []);
+                }
 
                 $pdo = DB::conn();
                 $pid = self::resolveProtocolId($protocol);
@@ -1653,9 +1661,15 @@ class InstallProtocolManager
                 $stmt2 = $pdo->prepare('INSERT INTO server_protocols (server_id, protocol_id, config_data, applied_at, created_at) VALUES (?, ?, ?, NOW(), NOW()) ON DUPLICATE KEY UPDATE config_data = VALUES(config_data), applied_at = NOW()');
                 $stmt2->execute([$serverId, $pid, json_encode($config)]);
             }
-            // Save vpn_port to vpn_servers table for shell protocols (like AIVPN)
+            // Save vpn_port to vpn_servers table ONLY for the primary (first) protocol
+            // Secondary protocols store their ports in server_protocols.config_data only
             if ($port !== null && $port > 0) {
-                self::markServerActive($serverId, null, ['vpn_port' => $port]);
+                $existingProtocol = $server->getData()['install_protocol'] ?? '';
+                $currentSlug = $protocol['slug'] ?? '';
+                $isFirstProtocol = ($existingProtocol === '' || $existingProtocol === $currentSlug);
+                if ($isFirstProtocol) {
+                    self::markServerActive($serverId, null, ['vpn_port' => $port]);
+                }
             }
             return $res;
         } catch (Throwable $e) {
