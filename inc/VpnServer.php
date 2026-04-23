@@ -811,9 +811,24 @@ BASH;
         $backupDir = '/var/www/html/backups';
         $backupPath = $backupDir . '/' . $backupName;
 
-        // Create backups directory if not exists
+        // Create backups directory if not exists and ensure www-data can write
         if (!is_dir($backupDir)) {
-            mkdir($backupDir, 0755, true);
+            if (!@mkdir($backupDir, 0775, true)) {
+                throw new Exception('Cannot create backups directory: ' . $backupDir);
+            }
+        }
+
+        // Fix permissions if directory is not writable (e.g. created by root during install)
+        if (!is_writable($backupDir)) {
+            @chmod($backupDir, 0775);
+            // If still not writable, try shell chown (may work if running as root or via sudo)
+            if (!is_writable($backupDir)) {
+                @shell_exec('chown www-data:www-data ' . escapeshellarg($backupDir) . ' 2>/dev/null');
+                @chmod($backupDir, 0775);
+            }
+            if (!is_writable($backupDir)) {
+                throw new Exception('Backups directory is not writable by www-data. Run: chown www-data:www-data ' . $backupDir);
+            }
         }
 
         try {

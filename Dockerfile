@@ -37,9 +37,11 @@ RUN git config --global --add safe.directory /var/www/html \
 # Configure Apache
 COPY apache.conf /etc/apache2/sites-available/000-default.conf
 
-# Set permissions
-RUN chown -R www-data:www-data /var/www/html \
-    && chmod -R 755 /var/www/html/public
+# Set permissions and create writable directories
+RUN mkdir -p /var/www/html/backups /var/www/html/logs \
+    && chown -R www-data:www-data /var/www/html \
+    && chmod -R 755 /var/www/html/public \
+    && chmod 775 /var/www/html/backups /var/www/html/logs
 
 # Setup cron jobs
 RUN echo "0 * * * * www-data cd /var/www/html && /usr/local/bin/php bin/check_expired_clients.php >> /var/log/cron.log 2>&1" > /etc/cron.d/amnezia-cron \
@@ -59,6 +61,10 @@ RUN chmod +x /var/www/html/bin/monitor_metrics.sh
 # Create startup script
 RUN echo '#!/bin/bash\n\
 service cron start\n\
+# Ensure writable directories exist with correct ownership\n\
+mkdir -p /var/www/html/backups /var/www/html/logs\n\
+chown www-data:www-data /var/www/html/backups /var/www/html/logs\n\
+chmod 775 /var/www/html/backups /var/www/html/logs\n\
 # Ensure www-data can talk to host docker socket if mounted\n\
 if [ -S /var/run/docker.sock ]; then\n\
   SOCK_GID=$(stat -c %g /var/run/docker.sock)\n\
