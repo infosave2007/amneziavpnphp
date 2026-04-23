@@ -1391,7 +1391,9 @@ class InstallProtocolManager
     {
         $metadata = $protocol['definition']['metadata'] ?? [];
         $serverData = $server->getData();
-        $containerName = $serverData['container_name'] ?? ($metadata['container_name'] ?? 'amnezia-awg');
+        // IMPORTANT: Use protocol metadata container_name first (e.g. 'amnezia-awg2'),
+        // NOT vpn_servers.container_name which belongs to the PRIMARY protocol (e.g. 'aivpn-server')
+        $containerName = $metadata['container_name'] ?? $serverData['container_name'] ?? 'amnezia-awg';
         $configDir = trim((string) ($metadata['config_dir'] ?? ''));
         if ($configDir === '') {
             $configDir = (($protocol['slug'] ?? '') === 'awg2') ? '/opt/amnezia/awg2' : '/opt/amnezia/awg';
@@ -2154,7 +2156,8 @@ class InstallProtocolManager
         }
 
         $serverData = $server->getData();
-        $containerName = $serverData['container_name'] ?? 'amnezia-awg';
+        $metadata = $protocol['definition']['metadata'] ?? [];
+        $containerName = $metadata['container_name'] ?? $serverData['container_name'] ?? 'amnezia-awg';
         // AWG2: try awg0.conf first (standard), fall back to wg0.conf (legacy)
         $isAwg2 = (stripos($containerName, 'awg2') !== false || ($protocol['slug'] ?? '') === 'awg2');
         $configDir = '/opt/amnezia/awg';
