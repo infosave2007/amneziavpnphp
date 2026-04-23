@@ -427,14 +427,16 @@ class InstallProtocolManager
     {
         $metadata = $protocol['definition']['metadata'] ?? [];
         $serverData = $server->getData();
-        $containerName = $serverData['container_name'] ?? ($metadata['container_name'] ?? 'amnezia-awg');
+        // For multi-protocol servers, use container_name from protocol metadata first
+        // (vpn_servers.container_name stores the primary protocol's container, e.g. 'aivpn-server')
+        $containerName = $metadata['container_name'] ?? ($serverData['container_name'] ?? 'amnezia-awg');
         $containerFilter = escapeshellarg('^' . $containerName . '$');
         $containerArg = escapeshellarg($containerName);
 
-        // Для AWG2 конфигурация внутри контейнера находится в /opt/amnezia/awg/awg0.conf
-        // На хосте может быть /opt/amnezia/awg2/wg0.conf (монтируется как /opt/amnezia/awg внутри контейнера)
+        // AWG2 uses awg0.conf (standard, same as native Amnezia app)
+        // Old AWG uses wg0.conf
         $isAwg2 = (stripos($containerName, 'awg2') !== false || ($protocol['slug'] ?? '') === 'awg2');
-        $configDir = $isAwg2 ? '/opt/amnezia/awg' : '/opt/amnezia/awg';
+        $configDir = '/opt/amnezia/awg';
         $configFile = $isAwg2 ? 'awg0.conf' : 'wg0.conf';
 
         $containerListRaw = trim($server->executeCommand("docker ps -a --filter name={$containerFilter} --format '{{.Names}}'", true));
@@ -466,13 +468,18 @@ class InstallProtocolManager
 
         $containerState = trim($server->executeCommand("docker inspect --format '{{.State.Status}}' {$containerArg}", true));
 
-        // Для AWG2 проверяем оба возможных имени файла конфигурации
-        $configFile = ($protocol['slug'] ?? '') === 'awg2' ? 'awg0.conf' : 'wg0.conf';
+        // AWG2: try awg0.conf first (standard), fall back to wg0.conf (legacy panel installs)
+        $configFile = $isAwg2 ? 'awg0.conf' : 'wg0.conf';
         $wgConfig = $server->executeCommand("docker exec -i {$containerArg} cat {$configDir}/{$configFile} 2>/dev/null", true);
-        if (trim($wgConfig) === '') {
+        if ($isAwg2 && (trim($wgConfig) === '' || strpos($wgConfig, '[Interface]') === false)) {
+            // Fallback to wg0.conf for legacy panel installs
+            $configFile = 'wg0.conf';
+            $wgConfig = $server->executeCommand("docker exec -i {$containerArg} cat {$configDir}/{$configFile} 2>/dev/null", true);
+        }
+        if (trim($wgConfig) === '' || strpos($wgConfig, '[Interface]') === false) {
             return [
                 'status' => 'partial',
-                'message' => "Контейнер найден, но конфигурация {$configFile} отсутствует",
+                'message' => "Контейнер найден, но конфигурация wg0.conf/awg0.conf отсутствует",
                 'details' => [
                     'container_name' => $containerName,
                     'container_status' => $containerState,
@@ -532,11 +539,18 @@ class InstallProtocolManager
         $containerName = $details['container_name'] ?? ($protocol['definition']['metadata']['container_name'] ?? 'amnezia-awg');
         $containerArg = escapeshellarg($containerName);
 
-        // Для AWG2 конфигурация внутри контейнера находится в /opt/amnezia/awg/awg0.conf
-        // На хосте может быть /opt/amnezia/awg2/wg0.conf (монтируется как /opt/amnezia/awg внутри контейнера)
+        // Config is always wg0.conf — container CMD runs: awg-quick up /opt/amnezia/awg/wg0.conf
         $isAwg2 = (stripos($containerName, 'awg2') !== false || ($protocol['slug'] ?? '') === 'awg2');
-        $configDir = '/opt/amnezia/awg'; // Внутри контейнера всегда /opt/amnezia/awg
+        $configDir = '/opt/amnezia/awg';
+        // AWG2: try awg0.conf first (standard), fall back to wg0.conf (legacy)
         $configFile = $isAwg2 ? 'awg0.conf' : 'wg0.conf';
+        $testConf = trim($server->executeCommand("docker exec -i {$containerArg} cat {$configDir}/{$configFile} 2>/dev/null", true));
+        if ($isAwg2 && ($testConf === '' || strpos($testConf, '[Interface]') === false)) {
+            $configFile = 'wg0.conf';
+        }
+
+        // Determine interface name from config filename (wg0.conf -> wg0, awg0.conf -> awg0)
+        $ifaceName = str_replace('.conf', '', $configFile);
 
         // Try to ensure container is running and wg is up
         $server->executeCommand("docker start {$containerArg} 2>/dev/null || true", true);
@@ -544,40 +558,64 @@ class InstallProtocolManager
         $server->executeCommand("docker exec -i {$containerArg} wg-quick up {$configDir}/{$configFile} 2>/dev/null || true", true);
 
         $pdo = DB::conn();
-        $stmt = $pdo->prepare('
-            UPDATE vpn_servers
-            SET vpn_port = ?,
-                server_public_key = ?,
-                preshared_key = ?,
-                awg_params = ?,
-                status = ?,
-                error_message = NULL,
-                deployed_at = COALESCE(deployed_at, NOW()),
-                install_protocol = ?
-            WHERE id = ?
-        ');
-        $stmt->execute([
-            $details['vpn_port'] ?? null,
-            $details['server_public_key'] ?? null,
-            $details['preshared_key'] ?? null,
-            isset($details['awg_params']) ? json_encode($details['awg_params']) : null,
-            'active',
-            $protocol['slug'] ?? ($isAwg2 ? 'awg2' : 'amnezia-wg'),
-            $server->getId()
-        ]);
-        
-        // Add entry to server_protocols table so protocol shows in installed list
+        $serverData = $server->getData();
+        $serverId = $server->getId();
         $protocolId = self::resolveProtocolId($protocol);
-        if ($protocolId) {
+        $protocolSlug = $protocol['slug'] ?? ($isAwg2 ? 'awg2' : 'amnezia-wg');
+
+        // Check if server already has another primary protocol installed
+        $existingProtocol = $serverData['install_protocol'] ?? '';
+        $isSecondaryProtocol = ($existingProtocol !== '' && $existingProtocol !== $protocolSlug);
+
+        if (!$isSecondaryProtocol) {
+            // Primary protocol — update vpn_servers
             $stmt = $pdo->prepare('
-                INSERT INTO server_protocols (server_id, protocol_id, applied_at)
-                VALUES (?, ?, NOW())
-                ON DUPLICATE KEY UPDATE applied_at = NOW()
+                UPDATE vpn_servers
+                SET vpn_port = ?,
+                    server_public_key = ?,
+                    preshared_key = ?,
+                    awg_params = ?,
+                    status = ?,
+                    error_message = NULL,
+                    deployed_at = COALESCE(deployed_at, NOW()),
+                    install_protocol = ?
+                WHERE id = ?
             ');
             $stmt->execute([
-                $server->getId(),
-                $protocolId
+                $details['vpn_port'] ?? null,
+                $details['server_public_key'] ?? null,
+                $details['preshared_key'] ?? null,
+                isset($details['awg_params']) ? json_encode($details['awg_params']) : null,
+                'active',
+                $protocolSlug,
+                $serverId
             ]);
+        } else {
+            // Secondary protocol — only ensure server is active, don't overwrite primary protocol data
+            $stmt = $pdo->prepare('UPDATE vpn_servers SET status = ?, error_message = NULL WHERE id = ?');
+            $stmt->execute(['active', $serverId]);
+        }
+        
+        // Store protocol-specific config in server_protocols (works for both primary and secondary)
+        if ($protocolId) {
+            $configData = json_encode([
+                'server_host' => $serverData['ip_address'] ?? $serverData['hostname'] ?? null,
+                'server_port' => $details['vpn_port'] ?? null,
+                'extras' => [
+                    'vpn_port' => $details['vpn_port'] ?? null,
+                    'vpn_subnet' => $details['vpn_subnet'] ?? '10.8.1.0/24',
+                    'server_public_key' => $details['server_public_key'] ?? null,
+                    'preshared_key' => $details['preshared_key'] ?? null,
+                    'awg_params' => $details['awg_params'] ?? null,
+                    'container_name' => $containerName,
+                ],
+            ]);
+            $stmt = $pdo->prepare('
+                INSERT INTO server_protocols (server_id, protocol_id, config_data, applied_at, created_at)
+                VALUES (?, ?, ?, NOW(), NOW())
+                ON DUPLICATE KEY UPDATE config_data = VALUES(config_data), applied_at = NOW()
+            ');
+            $stmt->execute([$serverId, $protocolId, $configData]);
         }
 
         $server->refresh();
@@ -646,18 +684,28 @@ class InstallProtocolManager
                         // Use existing keys and config
                     } else {
                         // Generate new key pair for this client
-                        $newPrivateKey = trim($server->executeCommand("docker exec -i {$containerArg} /usr/bin/awg genkey 2>/dev/null", true));
-                        $newPublicKey = trim($server->executeCommand("docker exec -i {$containerArg} sh -c 'echo \"'\"$newPrivateKey\"'\" | /usr/bin/awg pubkey' 2>/dev/null", true));
+                        // Use awg for AWG2, wg for standard
+                        $keyTool = $isAwg2 ? 'awg' : 'wg';
+                        $newPrivateKey = trim($server->executeCommand("docker exec {$containerArg} {$keyTool} genkey", true));
+                        if (!empty($newPrivateKey)) {
+                            $escapedKey = escapeshellarg($newPrivateKey);
+                            $newPublicKey = trim($server->executeCommand("docker exec {$containerArg} sh -c 'echo {$escapedKey} | {$keyTool} pubkey'", true));
+                        } else {
+                            $newPublicKey = '';
+                        }
                         
-                        if (!empty($newPrivateKey) && !empty($newPublicKey)) {
+                        Logger::appendInstall($serverId, "Restore: keygen for {$clientIp}: privkey_len=" . strlen($newPrivateKey) . " pubkey_len=" . strlen($newPublicKey));
+                        
+                        if (!empty($newPrivateKey) && !empty($newPublicKey) && strlen($newPublicKey) >= 40) {
                             $privateKey = $newPrivateKey;
                             $protocolSlug = $protocol['slug'] ?? '';
+                            $serverHost = $serverData['host'] ?? $serverData['ip_address'] ?? $serverData['hostname'] ?? '';
                             $config = VpnClient::buildClientConfig(
                                 $privateKey,
                                 $clientIp,
                                 $details['server_public_key'] ?? '',
                                 $details['preshared_key'] ?? '',
-                                $serverData['ip_address'] ?? $serverData['hostname'] ?? '',
+                                $serverHost,
                                 $details['vpn_port'] ?? 51820,
                                 $details['awg_params'] ?? [],
                                 $protocolSlug
@@ -667,6 +715,8 @@ class InstallProtocolManager
                             // Mark that we need to update server config with new public key
                             $needsServerConfigUpdate = true;
                             $keyUpdates[] = ['old' => $pub, 'new' => $newPublicKey];
+                        } else {
+                            Logger::appendInstall($serverId, "Restore: WARNING keygen failed for {$clientIp}, keeping original public key");
                         }
                     }
                     
@@ -693,7 +743,7 @@ class InstallProtocolManager
         if ($needsServerConfigUpdate && !empty($keyUpdates)) {
             Logger::appendInstall($serverId, "Restore: updating server config with " . count($keyUpdates) . " new public keys");
             
-            // Update awg0.conf - replace old public keys with new ones
+            // Update wg0.conf - replace old public keys with new ones
             $updatedConfig = $wgConfig;
             foreach ($keyUpdates as $update) {
                 // Escape special characters for regex
@@ -1403,6 +1453,7 @@ class InstallProtocolManager
 
             if ($isAwg) {
                 $detection = self::detectBuiltinAwg($server, $protocol);
+                Logger::appendInstall($serverId, 'AWG detect result: status=' . ($detection['status'] ?? 'null') . ' message=' . ($detection['message'] ?? 'none'));
                 if (($detection['status'] ?? '') === 'existing') {
                     Logger::appendInstall($serverId, 'Existing AWG installation detected, restoring instead of reinstalling');
                     $restoreResult = self::restoreBuiltinAwg($server, $protocol, $detection, $options);
@@ -2104,11 +2155,15 @@ class InstallProtocolManager
 
         $serverData = $server->getData();
         $containerName = $serverData['container_name'] ?? 'amnezia-awg';
-        // Для AWG2 конфигурация внутри контейнера находится в /opt/amnezia/awg/awg0.conf
+        // AWG2: try awg0.conf first (standard), fall back to wg0.conf (legacy)
         $isAwg2 = (stripos($containerName, 'awg2') !== false || ($protocol['slug'] ?? '') === 'awg2');
-        $configDir = '/opt/amnezia/awg'; // Внутри контейнера всегда /opt/amnezia/awg
+        $configDir = '/opt/amnezia/awg';
         $configFile = $isAwg2 ? 'awg0.conf' : 'wg0.conf';
         $conf = $server->executeCommand("docker exec -i $containerName cat {$configDir}/{$configFile}", true);
+        if ($isAwg2 && (!$conf || strpos($conf, '[Interface]') === false)) {
+            $configFile = 'wg0.conf';
+            $conf = $server->executeCommand("docker exec -i $containerName cat {$configDir}/{$configFile}", true);
+        }
         if (!$conf)
             return;
 
@@ -2454,11 +2509,15 @@ class InstallProtocolManager
         $serverData = $server->getData();
         $pid = self::resolveProtocolId($protocol);
 
-        // Для AWG2 конфигурация внутри контейнера находится в /opt/amnezia/awg/awg0.conf
+        // AWG2: try awg0.conf first (standard), fall back to wg0.conf (legacy)
         $isAwg2 = (stripos($containerName, 'awg2') !== false || ($protocol['slug'] ?? '') === 'awg2');
-        $configDir = '/opt/amnezia/awg'; // Внутри контейнера всегда /opt/amnezia/awg
+        $configDir = '/opt/amnezia/awg';
         $configFile = $isAwg2 ? 'awg0.conf' : 'wg0.conf';
         $wgConfig = $server->executeCommand("docker exec -i {$containerArg} cat {$configDir}/{$configFile} 2>/dev/null", true);
+        if ($isAwg2 && (trim($wgConfig) === '' || strpos($wgConfig, '[Interface]') === false)) {
+            $configFile = 'wg0.conf';
+            $wgConfig = $server->executeCommand("docker exec -i {$containerArg} cat {$configDir}/{$configFile} 2>/dev/null", true);
+        }
         $tableRaw = $server->executeCommand("docker exec -i {$containerArg} cat {$configDir}/clientsTable 2>/dev/null", true);
         $clientsTable = json_decode(trim($tableRaw), true);
 

@@ -100,6 +100,61 @@ class VpnClient
             }
         }
 
+        // For multi-protocol setups, override server data with protocol-specific settings
+        // (subnet, keys, port, AWG params) from server_protocols.config_data or protocol metadata
+        if ($protocolId) {
+            try {
+                $stmtSp = $pdo->prepare('SELECT config_data FROM server_protocols WHERE server_id = ? AND protocol_id = ? LIMIT 1');
+                $stmtSp->execute([$serverId, $protocolId]);
+                $spConfigRaw = $stmtSp->fetchColumn();
+                if ($spConfigRaw) {
+                    $spConfig = is_string($spConfigRaw) ? json_decode($spConfigRaw, true) : $spConfigRaw;
+                    if (is_array($spConfig)) {
+                        $spExtras = $spConfig['extras'] ?? [];
+                        // If extras has 'result' subarray, merge it
+                        if (isset($spExtras['result']) && is_array($spExtras['result'])) {
+                            $spExtras = array_merge($spExtras, $spExtras['result']);
+                        }
+                        // Override server data with protocol-specific values
+                        if (!empty($spExtras['server_public_key'])) {
+                            $serverData['server_public_key'] = $spExtras['server_public_key'];
+                        }
+                        if (!empty($spExtras['preshared_key'])) {
+                            $serverData['preshared_key'] = $spExtras['preshared_key'];
+                        }
+                        if (!empty($spExtras['vpn_port'])) {
+                            $serverData['vpn_port'] = $spExtras['vpn_port'];
+                        }
+                        if (!empty($spConfig['server_port'])) {
+                            $serverData['vpn_port'] = $spConfig['server_port'];
+                        }
+                        // Override AWG params from protocol config
+                        // AWG params can be at extras level (Jc, S1, etc.) or nested in extras.awg_params
+                        $awgOverride = [];
+                        $awgSource = $spExtras;
+                        if (isset($spExtras['awg_params']) && is_array($spExtras['awg_params'])) {
+                            $awgSource = array_merge($awgSource, $spExtras['awg_params']);
+                        }
+                        foreach (['Jc', 'Jmin', 'Jmax', 'S1', 'S2', 'S3', 'S4', 'H1', 'H2', 'H3', 'H4', 'I1', 'I2', 'I3', 'I4', 'I5'] as $ak) {
+                            if (isset($awgSource[$ak]) && $awgSource[$ak] !== '' && $awgSource[$ak] !== null) {
+                                $awgOverride[$ak] = $awgSource[$ak];
+                            }
+                        }
+                        if (!empty($awgOverride)) {
+                            $serverData['awg_params'] = json_encode($awgOverride);
+                        }
+                    }
+                }
+            } catch (Exception $e) {
+                error_log('Failed to load protocol config_data: ' . $e->getMessage());
+            }
+
+            // Override vpn_subnet from protocol definition metadata (e.g. AWG2 uses 10.8.1.0/24)
+            if (!empty($protoMetadata['vpn_subnet'])) {
+                $serverData['vpn_subnet'] = $protoMetadata['vpn_subnet'];
+            }
+        }
+
         $clientIP = self::getNextClientIP($serverData);
         $loginBase = $login !== null && $login !== '' ? $login : $name;
         $loginBase = str_replace(' ', '_', trim($loginBase));
@@ -742,9 +797,15 @@ class VpnClient
     private static function generateClientKeys(array $serverData, string $clientName): array
     {
         $containerName = $serverData['container_name'];
+        $protocolSlug = (string) ($serverData['install_protocol'] ?? '');
+        $isAwg2 = (stripos($containerName, 'awg2') !== false || $protocolSlug === 'awg2');
+        $wgTool = $isAwg2 ? 'awg' : 'wg';
+
         $cmd = sprintf(
-            "docker exec -i %s sh -lc 'set -e; umask 077; priv=\$(wg genkey | tr -d " . '"' . "\\r\\n" . '"' . "); [ -n \"\$priv\" ] || { echo empty_private_key; exit 1; }; pub=\$(printf " . '"' . "%%s\\n" . '"' . " \"\$priv\" | wg pubkey | tr -d " . '"' . "\\r\\n" . '"' . "); [ -n \"\$pub\" ] || { echo empty_public_key; exit 1; }; printf " . '"' . "%%s\\n---\\n%%s\\n" . '"' . " \"\$priv\" \"\$pub\"'",
-            escapeshellarg($containerName)
+            "docker exec -i %s sh -lc 'set -e; umask 077; priv=\$(%s genkey | tr -d " . '"' . "\\r\\n" . '"' . "); [ -n \"\$priv\" ] || { echo empty_private_key; exit 1; }; pub=\$(printf " . '"' . "%%s\\n" . '"' . " \"\$priv\" | %s pubkey | tr -d " . '"' . "\\r\\n" . '"' . "); [ -n \"\$pub\" ] || { echo empty_public_key; exit 1; }; printf " . '"' . "%%s\\n---\\n%%s\\n" . '"' . " \"\$priv\" \"\$pub\"'",
+            escapeshellarg($containerName),
+            $wgTool,
+            $wgTool
         );
 
         $escaped = escapeshellarg($cmd);
@@ -1133,10 +1194,18 @@ class VpnClient
     {
         $containerName = $serverData['container_name'];
         $protocolSlug = (string) ($serverData['install_protocol'] ?? '');
-        // Для AWG2 конфигурация внутри контейнера находится в /opt/amnezia/awg/awg0.conf
         $isAwg2 = (stripos($containerName, 'awg2') !== false || $protocolSlug === 'awg2');
-        $configDir = '/opt/amnezia/awg'; // Внутри контейнера всегда /opt/amnezia/awg
+        $configDir = '/opt/amnezia/awg';
+
+        // AWG2: try awg0.conf first (standard), fall back to wg0.conf (legacy panel installs)
         $configFile = $isAwg2 ? 'awg0.conf' : 'wg0.conf';
+        $testConf = trim(self::executeServerCommand($serverData, "docker exec -i {$containerName} cat {$configDir}/{$configFile} 2>/dev/null", true));
+        if ($isAwg2 && ($testConf === '' || strpos($testConf, '[Interface]') === false)) {
+            $configFile = 'wg0.conf';
+        }
+        // Interface name matches config filename (wg0.conf -> wg0, awg0.conf -> awg0)
+        $ifaceName = str_replace('.conf', '', $configFile);
+
         $presharedKey = $serverData['preshared_key'];
         $publicKey = trim($publicKey);
 
@@ -1144,16 +1213,21 @@ class VpnClient
             throw new Exception('Refusing to add client with empty public key');
         }
 
+        // Determine correct tool names (awg for AWG2, wg for standard)
+        $wgTool = $isAwg2 ? 'awg' : 'wg';
+        $wgQuickTool = $isAwg2 ? 'awg-quick' : 'wg-quick';
+
         // 1. Create temp file for PSK (to avoid shell escaping issues)
         $pskFile = '/tmp/' . bin2hex(random_bytes(8)) . '.psk';
         $cmd1 = sprintf("docker exec -i %s sh -c 'echo \"%s\" > %s'", $containerName, $presharedKey, $pskFile);
         self::executeServerCommand($serverData, $cmd1, true);
 
-        // 2. Add peer using wg set
-        // wg set wg0 peer <PUBKEY> preshared-key <FILE> allowed-ips <IPS>
+        // 2. Add peer using wg/awg set
         $cmd2 = sprintf(
-            "docker exec -i %s wg set wg0 peer %s preshared-key %s allowed-ips %s/32",
+            "docker exec -i %s %s set %s peer %s preshared-key %s allowed-ips %s/32",
             $containerName,
+            $wgTool,
+            $ifaceName,
             escapeshellarg($publicKey),
             $pskFile,
             $clientIP
@@ -1164,14 +1238,13 @@ class VpnClient
         $cmd3 = sprintf("docker exec -i %s rm -f %s", $containerName, $pskFile);
         self::executeServerCommand($serverData, $cmd3, true);
 
-        // 4. Persist to wg0.conf (append)
+        // 4. Persist to config file (append)
         $peerBlock = "\n[Peer]\n";
         $peerBlock .= "PublicKey = {$publicKey}\n";
         $peerBlock .= "PresharedKey = {$presharedKey}\n";
         $peerBlock .= "AllowedIPs = {$clientIP}/32\n";
 
         $escapedBlock = addslashes($peerBlock);
-        $configFile = (stripos($containerName, 'awg2') !== false || $protocolSlug === 'awg2') ? 'awg0.conf' : 'wg0.conf';
         $cmd4 = sprintf("docker exec -i %s sh -c 'echo \"%s\" >> %s/%s'", $containerName, $escapedBlock, $configDir, $configFile);
         self::executeServerCommand($serverData, $cmd4, true);
 
@@ -1180,7 +1253,7 @@ class VpnClient
 
         // 6. CRITICAL: Reload WG interface to apply AWG obfuscation params
         // Without this, the interface uses standard WireGuard without Jc/S1/S2/H1-H4
-        $cmd5 = sprintf("docker exec -i %s sh -c 'ip link del wg0 2>/dev/null || true; wg-quick up %s/%s 2>&1'", $containerName, $configDir, $configFile);
+        $cmd5 = sprintf("docker exec -i %s sh -c 'ip link del %s 2>/dev/null || true; %s up %s/%s 2>&1'", $containerName, $ifaceName, $wgQuickTool, $configDir, $configFile);
         self::executeServerCommand($serverData, $cmd5, true);
     }
 
@@ -1467,16 +1540,25 @@ class VpnClient
     {
         $containerName = $serverData['container_name'];
         $protocolSlug = (string) ($serverData['install_protocol'] ?? '');
-        // Для AWG2 конфигурация внутри контейнера находится в /opt/amnezia/awg/
-        $configDir = '/opt/amnezia/awg'; // Внутри контейнера всегда /opt/amnezia/awg
+        // Config dir inside container is always /opt/amnezia/awg
+        $configDir = '/opt/amnezia/awg';
 
-        // Determine config filename
-        $configFile = (stripos($containerName, 'awg2') !== false || $protocolSlug === 'awg2') ? 'awg0.conf' : 'wg0.conf';
+        // AWG2: try awg0.conf first (standard), fall back to wg0.conf (legacy panel installs)
+        $isAwg2 = (stripos($containerName, 'awg2') !== false || $protocolSlug === 'awg2');
+        $configFile = $isAwg2 ? 'awg0.conf' : 'wg0.conf';
+        $testConf = trim(self::executeServerCommand($serverData, "docker exec -i {$containerName} cat {$configDir}/{$configFile} 2>/dev/null", true));
+        if ($isAwg2 && ($testConf === '' || strpos($testConf, '[Interface]') === false)) {
+            $configFile = 'wg0.conf';
+        }
+        $ifaceName = str_replace('.conf', '', $configFile);
+        $wgTool = $isAwg2 ? 'awg' : 'wg';
 
-        // First, remove using wg command (live removal)
+        // First, remove using wg/awg command (live removal)
         $removeCmd = sprintf(
-            "docker exec -i %s wg set wg0 peer %s remove",
+            "docker exec -i %s %s set %s peer %s remove",
             $containerName,
+            $wgTool,
+            $ifaceName,
             escapeshellarg($publicKey)
         );
 
@@ -1503,7 +1585,8 @@ class VpnClient
         self::executeServerCommand($serverData, $writeCmd, true);
 
         // Save config
-        $saveCmd = sprintf("docker exec -i %s wg-quick save wg0", $containerName);
+        $wgQuickTool = $isAwg2 ? 'awg-quick' : 'wg-quick';
+        $saveCmd = sprintf("docker exec -i %s %s save %s", $containerName, $wgQuickTool, $ifaceName);
         self::executeServerCommand($serverData, $saveCmd, true);
 
         // Remove from clientsTable

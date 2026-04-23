@@ -58,8 +58,10 @@
       <h3 class="font-bold mb-4">{{ t('servers.server_info') }}</h3>
       <dl class="space-y-2">
         <div><dt class="text-sm text-gray-600">{{ t('common.status') }}</dt><dd><span class="px-2 py-1 bg-green-100 text-green-800 rounded text-sm">{{ server.status }}</span></dd></div>
+        {% if server_protocols|length <= 1 %}
         <div><dt class="text-sm text-gray-600">VPN Port</dt><dd>{{ server.vpn_port }}</dd></div>
         <div><dt class="text-sm text-gray-600">Subnet</dt><dd>{{ server.vpn_subnet }}</dd></div>
+        {% endif %}
         
       </dl>
 

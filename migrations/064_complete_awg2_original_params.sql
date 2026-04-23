@@ -51,7 +51,7 @@ docker build --no-cache -t amnezia-awg2 /opt/amnezia/awg2/src
 
 EXISTING=$(docker ps -aq -f "name=$CONTAINER_NAME" 2>/dev/null | head -1)
 if [ -z "$EXISTING" ]; then
-  docker run -d --name "$CONTAINER_NAME" --restart always --cap-add=NET_ADMIN --device /dev/net/tun -p "${VPN_PORT}:${VPN_PORT}/udp" -v /opt/amnezia/awg2:/opt/amnezia/awg amnezia-awg2 sh -c "while [ ! -f /opt/amnezia/awg/wg0.conf ]; do sleep 1; done; WG_QUICK_USERSPACE_IMPLEMENTATION=amneziawg-go awg-quick up /opt/amnezia/awg/wg0.conf && sleep infinity"
+  docker run -d --name "$CONTAINER_NAME" --restart always --cap-add=NET_ADMIN --device /dev/net/tun -p "${VPN_PORT}:${VPN_PORT}/udp" -v /opt/amnezia/awg2:/opt/amnezia/awg amnezia-awg2 sh -c "while [ ! -f /opt/amnezia/awg/awg0.conf ]; do sleep 1; done; WG_QUICK_USERSPACE_IMPLEMENTATION=amneziawg-go awg-quick up /opt/amnezia/awg/awg0.conf && sleep infinity"
   sleep 2
 else
   STATUS=$(docker inspect --format="{{.State.Status}}" "$CONTAINER_NAME" 2>/dev/null || echo "")
@@ -59,12 +59,28 @@ else
     docker start "$CONTAINER_NAME" >/dev/null 2>&1 || true
   fi
 fi
+# Check for existing config: first on host, then inside container (native Amnezia app installs)
+CONF_FILE="/opt/amnezia/awg2/awg0.conf"
+if [ ! -f "$CONF_FILE" ]; then
+  # Try to extract config from inside the container (native Amnezia app stores config without volume mount)
+  CONTAINER_CONF=$(docker exec "$CONTAINER_NAME" cat /opt/amnezia/awg/awg0.conf 2>/dev/null || true)
+  if [ -n "$CONTAINER_CONF" ] && echo "$CONTAINER_CONF" | grep -q "\\[Interface\\]"; then
+    mkdir -p /opt/amnezia/awg2
+    echo "$CONTAINER_CONF" > /opt/amnezia/awg2/awg0.conf
+    # Also extract keys if available
+    docker exec "$CONTAINER_NAME" cat /opt/amnezia/awg/wireguard_server_private_key.key > /opt/amnezia/awg2/wireguard_server_private_key.key 2>/dev/null || true
+    docker exec "$CONTAINER_NAME" cat /opt/amnezia/awg/wireguard_server_public_key.key > /opt/amnezia/awg2/wireguard_server_public_key.key 2>/dev/null || true
+    docker exec "$CONTAINER_NAME" cat /opt/amnezia/awg/wireguard_psk.key > /opt/amnezia/awg2/wireguard_psk.key 2>/dev/null || true
+    docker exec "$CONTAINER_NAME" cat /opt/amnezia/awg/clientsTable > /opt/amnezia/awg2/clientsTable 2>/dev/null || true
+    echo "Extracted existing config from container"
+  fi
+fi
 
-if [ -f /opt/amnezia/awg2/wg0.conf ]; then
-  PORT=$(grep -E "^ListenPort" /opt/amnezia/awg2/wg0.conf | cut -d= -f2 | tr -d "[:space:]")
+if [ -f /opt/amnezia/awg2/awg0.conf ]; then
+  PORT=$(grep -E "^ListenPort" /opt/amnezia/awg2/awg0.conf | cut -d= -f2 | tr -d "[:space:]")
   PSK=$(cat /opt/amnezia/awg2/wireguard_psk.key 2>/dev/null || true)
   if [ -z "$PSK" ]; then
-    PSK=$(grep -E "^PresharedKey" /opt/amnezia/awg2/wg0.conf | cut -d= -f2 | tr -d "[:space:]")
+    PSK=$(grep -E "^PresharedKey" /opt/amnezia/awg2/awg0.conf | head -1 | cut -d= -f2 | tr -d "[:space:]")
   fi
   PUBKEY=$(cat /opt/amnezia/awg2/wireguard_server_public_key.key 2>/dev/null || true)
   if [ -z "$PUBKEY" ]; then
@@ -83,7 +99,7 @@ if [ -f /opt/amnezia/awg2/wg0.conf ]; then
   echo "Server Host: $EXTERNAL_IP"
 
   for P in Jc Jmin Jmax S1 S2 S3 S4 H1 H2 H3 H4 I1 I2 I3 I4 I5; do
-    VAL=$(sed -n -E "s/^[[:space:]]*$P[[:space:]]*=[[:space:]]*//p" /opt/amnezia/awg2/wg0.conf | head -1 | tr -d "\r")
+    VAL=$(sed -n -E "s/^[[:space:]]*$P[[:space:]]*=[[:space:]]*//p" /opt/amnezia/awg2/awg0.conf | head -1 | tr -d "\\r")
     if [ -n "$VAL" ] || [[ "$P" =~ ^I[2-5]$ ]]; then echo "Variable: $P=$VAL"; fi
   done
   echo "Variable: dns_servers=1.1.1.1, 1.0.0.1"
@@ -130,7 +146,7 @@ echo "H4 = $H4_VAL"
 echo "I1 = $I1_VAL"
 echo "PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -A FORWARD -o %i -j ACCEPT; iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE"
 echo "PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACCEPT; iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE"
-} > /opt/amnezia/awg2/wg0.conf
+} > /opt/amnezia/awg2/awg0.conf
 
 echo "$PRIVATE_KEY" > /opt/amnezia/awg2/wireguard_server_private_key.key
 echo "$PUBLIC_KEY" > /opt/amnezia/awg2/wireguard_server_public_key.key
