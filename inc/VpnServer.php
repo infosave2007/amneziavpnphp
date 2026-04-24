@@ -45,6 +45,29 @@ class VpnServer
     }
 
     /**
+     * Normalize SSH private key: fix line endings, trim whitespace, ensure trailing newline.
+     * Fixes "error in libcrypto" when keys are pasted from Windows or browsers.
+     */
+    private static function normalizeSshKey(string $key): string
+    {
+        // Remove \r (Windows line endings)
+        $key = str_replace("\r\n", "\n", $key);
+        $key = str_replace("\r", "\n", $key);
+        // Trim each line (remove trailing spaces)
+        $lines = explode("\n", $key);
+        $lines = array_map('rtrim', $lines);
+        // Remove empty lines at start/end but keep internal structure
+        while (!empty($lines) && trim($lines[0]) === '') array_shift($lines);
+        while (!empty($lines) && trim(end($lines)) === '') array_pop($lines);
+        $key = implode("\n", $lines);
+        // PEM/OpenSSH keys MUST end with a newline
+        if ($key !== '' && substr($key, -1) !== "\n") {
+            $key .= "\n";
+        }
+        return $key;
+    }
+
+    /**
      * Create new VPN server in database
      */
     public static function create(array $data): int
@@ -88,7 +111,7 @@ class VpnServer
             $data['port'],
             $data['username'],
             $data['password'] ?? null,
-            $data['ssh_key'] ?? null,
+            !empty($data['ssh_key']) ? self::normalizeSshKey($data['ssh_key']) : null,
             $data['container_name'] ?? 'amnezia-awg',
             $protocolSlug,
             $installOptions,
@@ -388,7 +411,7 @@ class VpnServer
 
         if (!empty($this->data['ssh_key'])) {
             $keyFile = tempnam(sys_get_temp_dir(), 'sshkey');
-            file_put_contents($keyFile, $this->data['ssh_key']);
+            file_put_contents($keyFile, self::normalizeSshKey($this->data['ssh_key']));
             chmod($keyFile, 0600);
             $sshOptions .= " -i {$keyFile} -o IdentitiesOnly=yes -o PubkeyAuthentication=yes -o PreferredAuthentications=publickey";
             // sshpass is not needed for key-based auth
@@ -438,7 +461,7 @@ class VpnServer
 
         if (!empty($this->data['ssh_key'])) {
             $keyFile = tempnam(sys_get_temp_dir(), 'sshkey');
-            file_put_contents($keyFile, $this->data['ssh_key']);
+            file_put_contents($keyFile, self::normalizeSshKey($this->data['ssh_key']));
             chmod($keyFile, 0600);
             $sshOptions .= " -i {$keyFile} -o IdentitiesOnly=yes -o PubkeyAuthentication=yes -o PreferredAuthentications=publickey";
 
