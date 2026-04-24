@@ -367,18 +367,20 @@ class ServerMonitoring
                     $rawOutNow = (int) ($aivpn['bytes_out'] ?? 0);
 
                     // Detect counter rollover/reset in AIVPN source and preserve cumulative totals.
+                    // bytes_in -> received (download), bytes_out -> sent (upload)
                     if ($rawInNow < $rawInPrev) {
-                        $offsetIn = max($offsetIn + $rawInPrev, $prevSent);
+                        $offsetIn = max($offsetIn + $rawInPrev, $prevReceived);
                     }
                     if ($rawOutNow < $rawOutPrev) {
-                        $offsetOut = max($offsetOut + $rawOutPrev, $prevReceived);
+                        $offsetOut = max($offsetOut + $rawOutPrev, $prevSent);
                     }
 
-                    $candidateSent = $offsetIn + $rawInNow;
-                    $candidateReceived = $offsetOut + $rawOutNow;
+                    $candidateReceived = $offsetIn + $rawInNow;
+                    $candidateSent = $offsetOut + $rawOutNow;
 
-                    // AIVPN stores per-client counters as bytes_in/bytes_out.
-                    // Map to panel semantics: sent=client upload, received=client download.
+                    // AIVPN bytes_in = data downloaded BY client (server→client)
+                    // AIVPN bytes_out = data uploaded BY client (client→server)
+                    // Verified via `aivpn-server --list-clients` where bytes_in = DOWNLOAD column
                     $bytesSent = max($prevSent, $candidateSent);
                     $bytesReceived = max($prevReceived, $candidateReceived);
 
