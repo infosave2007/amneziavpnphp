@@ -88,13 +88,14 @@ class ServerMonitoring
     public function collectMetrics(): array
     {
         // Combine all metric commands into one SSH call
-        $combinedCmd = implode(' && ', [
+        // Use semicolons instead of && to ensure all commands execute even if one fails
+        $combinedCmd = implode('; ', [
             "echo CPU_START",
             "top -bn1 | grep 'Cpu(s)' | sed 's/.*, *\\([0-9.]*\\)%* id.*/\\1/' | awk '{print 100 - \$1}'",
             "echo RAM_START",
             "free -m | grep Mem | awk '{print \$3, \$2}'",
             "echo DISK_START",
-            "df -BG / | tail -1 | awk '{gsub(/G/,\"\"); print \$3, \$2}'",
+            "df -BM / | tail -1 | awk '{print int(\$3/1024), int(\$2/1024)}'",
             "echo NET_RX_START",
             "cat /sys/class/net/\$(ip route | grep default | awk '{print \$5}' | head -1)/statistics/rx_bytes",
             "echo NET_TX_START",
@@ -161,7 +162,7 @@ class ServerMonitoring
         $txMbps = null;
         if ($rxBytes1 !== null && $txBytes1 !== null) {
             sleep(1);
-            $netCmd = implode(' && ', [
+            $netCmd = implode('; ', [
                 "echo RX",
                 "cat /sys/class/net/\$(ip route | grep default | awk '{print \$5}' | head -1)/statistics/rx_bytes",
                 "echo TX",
@@ -657,8 +658,8 @@ class ServerMonitoring
             // Password authentication
             $sshOptions .= " -o PreferredAuthentications=password -o PubkeyAuthentication=no";
             $sshCmd = sprintf(
-                "sshpass -p '%s' ssh -p %d %s %s@%s %s 2>/dev/null",
-                $password,
+                "sshpass -p %s ssh -p %d %s %s@%s %s 2>/dev/null",
+                escapeshellarg($password),
                 $port,
                 $sshOptions,
                 $username,
