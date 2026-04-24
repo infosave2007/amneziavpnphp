@@ -12,7 +12,7 @@
     "php": ">=8.0",
     "twig/twig": "^3.8",
     "endroid/qr-code": "^4.8 || ^5.0",
-    "firebase/php-jwt": "^6.11",
+    "firebase/php-jwt": "^7.0",
     "ext-pdo": "*",
     "ext-json": "*",
     "ext-curl": "*",
