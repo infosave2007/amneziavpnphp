@@ -83,17 +83,120 @@ class ServerMonitoring
 
     /**
      * Collect all server metrics
+     * Uses a single SSH call to minimize connections (#42)
      */
     public function collectMetrics(): array
     {
+        // Combine all metric commands into one SSH call
+        $combinedCmd = implode(' && ', [
+            "echo CPU_START",
+            "top -bn1 | grep 'Cpu(s)' | sed 's/.*, *\\([0-9.]*\\)%* id.*/\\1/' | awk '{print 100 - \$1}'",
+            "echo RAM_START",
+            "free -m | grep Mem | awk '{print \$3, \$2}'",
+            "echo DISK_START",
+            "df -BG / | tail -1 | awk '{gsub(/G/,\"\"); print \$3, \$2}'",
+            "echo NET_RX_START",
+            "cat /sys/class/net/\$(ip route | grep default | awk '{print \$5}' | head -1)/statistics/rx_bytes",
+            "echo NET_TX_START",
+            "cat /sys/class/net/\$(ip route | grep default | awk '{print \$5}' | head -1)/statistics/tx_bytes",
+        ]);
+
+        $result1 = $this->execSSH($combinedCmd);
+
+        // Parse first batch
+        $cpu = null;
+        $ramUsed = null;
+        $ramTotal = null;
+        $diskUsed = null;
+        $diskTotal = null;
+        $rxBytes1 = null;
+        $txBytes1 = null;
+
+        if ($result1) {
+            $lines = explode("\n", trim($result1));
+            $section = '';
+            foreach ($lines as $line) {
+                $line = trim($line);
+                if ($line === 'CPU_START') { $section = 'cpu'; continue; }
+                if ($line === 'RAM_START') { $section = 'ram'; continue; }
+                if ($line === 'DISK_START') { $section = 'disk'; continue; }
+                if ($line === 'NET_RX_START') { $section = 'rx'; continue; }
+                if ($line === 'NET_TX_START') { $section = 'tx'; continue; }
+
+                switch ($section) {
+                    case 'cpu':
+                        $cpu = (float) $line;
+                        $section = '';
+                        break;
+                    case 'ram':
+                        $parts = preg_split('/\s+/', $line);
+                        if (count($parts) >= 2) {
+                            $ramUsed = (int) $parts[0];
+                            $ramTotal = (int) $parts[1];
+                        }
+                        $section = '';
+                        break;
+                    case 'disk':
+                        $parts = preg_split('/\s+/', $line);
+                        if (count($parts) >= 2) {
+                            $diskUsed = (float) $parts[0];
+                            $diskTotal = (float) $parts[1];
+                        }
+                        $section = '';
+                        break;
+                    case 'rx':
+                        $rxBytes1 = (int) $line;
+                        $section = '';
+                        break;
+                    case 'tx':
+                        $txBytes1 = (int) $line;
+                        $section = '';
+                        break;
+                }
+            }
+        }
+
+        // Second SSH call after 1 second for network speed (only if first succeeded)
+        $rxMbps = null;
+        $txMbps = null;
+        if ($rxBytes1 !== null && $txBytes1 !== null) {
+            sleep(1);
+            $netCmd = implode(' && ', [
+                "echo RX",
+                "cat /sys/class/net/\$(ip route | grep default | awk '{print \$5}' | head -1)/statistics/rx_bytes",
+                "echo TX",
+                "cat /sys/class/net/\$(ip route | grep default | awk '{print \$5}' | head -1)/statistics/tx_bytes",
+            ]);
+            $result2 = $this->execSSH($netCmd);
+            if ($result2) {
+                $lines = explode("\n", trim($result2));
+                $section = '';
+                $rxBytes2 = null;
+                $txBytes2 = null;
+                foreach ($lines as $line) {
+                    $line = trim($line);
+                    if ($line === 'RX') { $section = 'rx'; continue; }
+                    if ($line === 'TX') { $section = 'tx'; continue; }
+                    if ($section === 'rx') { $rxBytes2 = (int) $line; $section = ''; }
+                    if ($section === 'tx') { $txBytes2 = (int) $line; $section = ''; }
+                }
+                if ($rxBytes2 !== null) {
+                    $rxMbps = round((($rxBytes2 - $rxBytes1) * 8) / 1000000, 2);
+                }
+                if ($txBytes2 !== null) {
+                    $txMbps = round((($txBytes2 - $txBytes1) * 8) / 1000000, 2);
+                }
+            }
+        }
+
         $metrics = [
-            'cpu_percent' => $this->getCpuUsage(),
-            'ram_used_mb' => $this->getRamUsed(),
-            'ram_total_mb' => $this->getRamTotal(),
-            'disk_used_gb' => $this->getDiskUsed(),
-            'disk_total_gb' => $this->getDiskTotal(),
-            'network_rx_mbps' => $this->getNetworkRxSpeed(),
-            'network_tx_mbps' => $this->getNetworkTxSpeed(),
+            'cpu_percent' => $cpu,
+            'ram_used_mb' => $ramUsed,
+            'ram_total_mb' => $ramTotal,
+            'disk_used_gb' => $diskUsed,
+            'disk_total_gb' => $diskTotal,
+            'network_rx_mbps' => $rxMbps,
+            'network_tx_mbps' => $txMbps,
         ];
 
         $this->saveServerMetrics($metrics);
@@ -116,11 +219,10 @@ class ServerMonitoring
         }
 
         // Pre-fetch X-ray stats only for Xray servers.
-        // Otherwise we block AWG/WireGuard stats collection with irrelevant Xray errors.
         if ($this->isXrayServer()) {
             if (!$this->fetchXrayStats()) {
                 error_log("Failed to fetch X-ray stats, preventing DB overwrite");
-                return []; // Abort only for Xray servers
+                return [];
             }
         }
 
@@ -140,12 +242,6 @@ class ServerMonitoring
 
             $stats = $this->getClientStats($client);
             if ($stats) {
-                // Check if speed values are excessively high (spike detection)
-                // Use 10Gbps (1250 MB/s) as sanity limit. 1250 * 1024 * 1024 ~ 1.3e9
-                // Actually ServerMonitoring calculates bytes/sec. 
-                // If speed is > 2 Gbit/s likely an error (unless on 10G link, but rare)
-                // Let's rely on simple positive check for now.
-
                 $this->saveClientMetrics($client['id'], $stats);
                 $results[] = [
                     'client_id' => $client['id'],
@@ -157,113 +253,6 @@ class ServerMonitoring
         }
 
         return $results;
-    }
-
-    /**
-     * Get CPU usage percentage
-     */
-    private function getCpuUsage(): ?float
-    {
-        $cmd = "top -bn1 | grep 'Cpu(s)' | sed 's/.*, *\\([0-9.]*\\)%* id.*/\\1/' | awk '{print 100 - \$1}'";
-        $result = $this->execSSH($cmd);
-
-        return $result ? (float) trim($result) : null;
-    }
-
-    /**
-     * Get RAM used in MB
-     */
-    private function getRamUsed(): ?int
-    {
-        $cmd = "free -m | grep Mem | awk '{print \$3}'";
-        $result = $this->execSSH($cmd);
-
-        return $result ? (int) trim($result) : null;
-    }
-
-    /**
-     * Get total RAM in MB
-     */
-    private function getRamTotal(): ?int
-    {
-        $cmd = "free -m | grep Mem | awk '{print \$2}'";
-        $result = $this->execSSH($cmd);
-
-        return $result ? (int) trim($result) : null;
-    }
-
-    /**
-     * Get disk used in GB
-     */
-    private function getDiskUsed(): ?float
-    {
-        $cmd = "df -BG / | tail -1 | awk '{print \$3}' | sed 's/G//'";
-        $result = $this->execSSH($cmd);
-
-        return $result ? (float) trim($result) : null;
-    }
-
-    /**
-     * Get total disk in GB
-     */
-    private function getDiskTotal(): ?float
-    {
-        $cmd = "df -BG / | tail -1 | awk '{print \$2}' | sed 's/G//'";
-        $result = $this->execSSH($cmd);
-
-        return $result ? (float) trim($result) : null;
-    }
-
-    /**
-     * Get network RX speed in Mbps
-     */
-    private function getNetworkRxSpeed(): ?float
-    {
-        // Get bytes received on main interface
-        $cmd = "cat /sys/class/net/\$(ip route | grep default | awk '{print \$5}' | head -1)/statistics/rx_bytes";
-        $bytes1 = $this->execSSH($cmd);
-
-        if (!$bytes1)
-            return null;
-
-        sleep(1); // Wait 1 second
-
-        $bytes2 = $this->execSSH($cmd);
-
-        if (!$bytes2)
-            return null;
-
-        // Calculate speed in Mbps
-        $bytesPerSec = (int) $bytes2 - (int) $bytes1;
-        $mbps = ($bytesPerSec * 8) / 1000000;
-
-        return round($mbps, 2);
-    }
-
-    /**
-     * Get network TX speed in Mbps
-     */
-    private function getNetworkTxSpeed(): ?float
-    {
-        // Get bytes transmitted on main interface
-        $cmd = "cat /sys/class/net/\$(ip route | grep default | awk '{print \$5}' | head -1)/statistics/tx_bytes";
-        $bytes1 = $this->execSSH($cmd);
-
-        if (!$bytes1)
-            return null;
-
-        sleep(1); // Wait 1 second
-
-        $bytes2 = $this->execSSH($cmd);
-
-        if (!$bytes2)
-            return null;
-
-        // Calculate speed in Mbps
-        $bytesPerSec = (int) $bytes2 - (int) $bytes1;
-        $mbps = ($bytesPerSec * 8) / 1000000;
-
-        return round($mbps, 2);
     }
 
     /**
@@ -629,26 +618,59 @@ class ServerMonitoring
 
     /**
      * Execute SSH command on server
+     * Supports both password and SSH key authentication
      */
     private function execSSH(string $cmd): ?string
     {
         $host = $this->serverData['host'];
         $port = (int)$this->serverData['port'];
         $username = $this->serverData['username'];
-        $password = $this->serverData['password'];
+        $sshKey = $this->serverData['ssh_key'] ?? '';
+        $password = $this->serverData['password'] ?? '';
 
-        $sshOptions = '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null';
-        $sshCmd = sprintf(
-            "sshpass -p '%s' ssh -p %d %s %s@%s %s 2>/dev/null",
-            $password,
-            $port,
-            $sshOptions,
-            $username,
-            $host,
-            escapeshellarg($cmd)
-        );
+        $sshOptions = '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o LogLevel=ERROR';
+        $keyFile = '';
+
+        if (!empty($sshKey)) {
+            // SSH key authentication
+            $keyFile = tempnam(sys_get_temp_dir(), 'sshkey');
+            // Normalize key (fix \r\n, ensure trailing newline)
+            $sshKey = str_replace("\r\n", "\n", $sshKey);
+            $sshKey = str_replace("\r", "\n", $sshKey);
+            if ($sshKey !== '' && substr($sshKey, -1) !== "\n") {
+                $sshKey .= "\n";
+            }
+            file_put_contents($keyFile, $sshKey);
+            chmod($keyFile, 0600);
+            $sshOptions .= " -i {$keyFile} -o IdentitiesOnly=yes -o PubkeyAuthentication=yes -o PreferredAuthentications=publickey";
+            $sshCmd = sprintf(
+                "ssh -p %d %s %s@%s %s 2>/dev/null",
+                $port,
+                $sshOptions,
+                $username,
+                $host,
+                escapeshellarg($cmd)
+            );
+        } else {
+            // Password authentication
+            $sshOptions .= " -o PreferredAuthentications=password -o PubkeyAuthentication=no";
+            $sshCmd = sprintf(
+                "sshpass -p '%s' ssh -p %d %s %s@%s %s 2>/dev/null",
+                $password,
+                $port,
+                $sshOptions,
+                $username,
+                $host,
+                escapeshellarg($cmd)
+            );
+        }
 
         $output = shell_exec($sshCmd);
+
+        // Clean up temp key file
+        if ($keyFile && file_exists($keyFile)) {
+            unlink($keyFile);
+        }
 
         return $output ?: null;
     }

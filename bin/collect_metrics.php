@@ -25,14 +25,26 @@ ini_set('display_errors', 1);
 ini_set('log_errors', 1);
 ini_set('error_log', '/var/log/metrics_collector_errors.log');
 
+// Prevent multiple instances using flock (#42)
+$lockFile = '/var/run/collect_metrics.lock';
+$lockFp = fopen($lockFile, 'w');
+if (!$lockFp || !flock($lockFp, LOCK_EX | LOCK_NB)) {
+    echo "[" . date('Y-m-d H:i:s') . "] Another collector instance is already running. Exiting.\n";
+    exit(0);
+}
+
 // Write PID file for monitoring
 $pidFile = '/var/run/collect_metrics.pid';
 file_put_contents($pidFile, getmypid());
 
-// Register shutdown function to clean up PID file
-register_shutdown_function(function() use ($pidFile) {
+// Register shutdown function to clean up PID and lock files
+register_shutdown_function(function() use ($pidFile, $lockFp, $lockFile) {
     if (file_exists($pidFile)) {
         unlink($pidFile);
+    }
+    if ($lockFp) {
+        flock($lockFp, LOCK_UN);
+        fclose($lockFp);
     }
 });
 
