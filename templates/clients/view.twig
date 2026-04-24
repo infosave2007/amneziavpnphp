@@ -239,7 +239,7 @@ async function updateExpiration(event, clientId) {
   }
   
   try {
-    const response = await fetch(`/api/clients/${clientId}/set-expiration`, {
+    const response = await fetch(`/clients/${clientId}/set-expiration`, {
       method: 'POST',
       credentials: 'same-origin',
       headers: {
@@ -250,7 +250,7 @@ async function updateExpiration(event, clientId) {
     
     const data = await response.json();
     
-    if (data.success !== false) {
+    if (response.ok && data.success === true) {
       alert('Expiration updated successfully');
       document.getElementById('currentExpiration').textContent = displayText;
       // Reset form
@@ -293,18 +293,18 @@ async function updateTrafficLimit(event, clientId) {
   }
   
   try {
-    const response = await fetch(`/api/clients/${clientId}/set-traffic-limit`, {
+    const response = await fetch(`/clients/${clientId}/set-traffic-limit`, {
       method: 'POST',
       credentials: 'same-origin',
       headers: {
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({ limit_bytes: limitBytes })
+      body: JSON.stringify({ traffic_limit: limitBytes })
     });
     
     const data = await response.json();
     
-    if (data.success !== false) {
+    if (response.ok && data.success === true) {
       alert('Traffic limit updated successfully');
       // Reload page to show updated traffic info
       window.location.reload();

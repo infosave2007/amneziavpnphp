@@ -1613,6 +1613,65 @@ Router::post('/clients/{id}/sync-stats', function ($params) {
     }
 });
 
+// Set client expiration (web session auth)
+Router::post('/clients/{id}/set-expiration', function ($params) {
+    requireAuth();
+    header('Content-Type: application/json');
+    $clientId = (int) $params['id'];
+    $raw = file_get_contents('php://input');
+    $data = json_decode($raw, true);
+
+    $expiresAt = $data['expires_at'] ?? null;
+
+    try {
+        $client = new VpnClient($clientId);
+        $clientData = $client->getData();
+
+        $user = Auth::user();
+        if ($clientData['user_id'] != $user['id'] && !Auth::isAdmin()) {
+            http_response_code(403);
+            echo json_encode(['success' => false, 'error' => 'Forbidden']);
+            return;
+        }
+
+        VpnClient::setExpiration($clientId, $expiresAt);
+        echo json_encode(['success' => true, 'expires_at' => $expiresAt]);
+    } catch (Exception $e) {
+        http_response_code(500);
+        echo json_encode(['success' => false, 'error' => $e->getMessage()]);
+    }
+});
+
+// Set client traffic limit (web session auth)
+Router::post('/clients/{id}/set-traffic-limit', function ($params) {
+    requireAuth();
+    header('Content-Type: application/json');
+    $clientId = (int) $params['id'];
+    $raw = file_get_contents('php://input');
+    $data = json_decode($raw, true);
+
+    $limitBytes = isset($data['traffic_limit']) ? (int) $data['traffic_limit'] : null;
+
+    try {
+        $client = new VpnClient($clientId);
+        $clientData = $client->getData();
+
+        $user = Auth::user();
+        if ($clientData['user_id'] != $user['id'] && !Auth::isAdmin()) {
+            http_response_code(403);
+            echo json_encode(['success' => false, 'error' => 'Forbidden']);
+            return;
+        }
+
+        $pdo = DB::conn();
+        $stmt = $pdo->prepare('UPDATE vpn_clients SET traffic_limit = ? WHERE id = ?');
+        $stmt->execute([$limitBytes, $clientId]);
+        echo json_encode(['success' => true, 'traffic_limit' => $limitBytes]);
+    } catch (Exception $e) {
+        http_response_code(500);
+        echo json_encode(['success' => false, 'error' => $e->getMessage()]);
+    }
+});
 // Sync all stats for server
 Router::post('/servers/{id}/sync-stats', function ($params) {
     requireAuth();
