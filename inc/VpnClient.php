@@ -810,8 +810,8 @@ class VpnClient
 
         $escaped = escapeshellarg($cmd);
         $sshCmd = sprintf(
-            "sshpass -p '%s' ssh -p %d -q -o LogLevel=ERROR -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o PreferredAuthentications=password -o PubkeyAuthentication=no %s@%s %s 2>&1",
-            $serverData['password'],
+            "sshpass -p %s ssh -p %d -q -o LogLevel=ERROR -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o PreferredAuthentications=password -o PubkeyAuthentication=no %s@%s %s 2>&1",
+            escapeshellarg($serverData['password']),
             $serverData['port'],
             $serverData['username'],
             $serverData['host'],
@@ -1308,8 +1308,8 @@ class VpnClient
         $run = static function (string $cmd) use ($serverData): string {
             $escapedCommand = escapeshellarg($cmd);
             $sshCommand = sprintf(
-                "sshpass -p '%s' ssh  -p %d -q -o LogLevel=ERROR -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o PreferredAuthentications=password -o PubkeyAuthentication=no %s@%s %s 2>&1",
-                $serverData['password'],
+                "sshpass -p %s ssh  -p %d -q -o LogLevel=ERROR -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o PreferredAuthentications=password -o PubkeyAuthentication=no %s@%s %s 2>&1",
+                escapeshellarg($serverData['password']),
                 $serverData['port'],
                 $serverData['username'],
                 $serverData['host'],

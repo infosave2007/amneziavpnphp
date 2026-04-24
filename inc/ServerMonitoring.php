@@ -1118,8 +1118,8 @@ class ServerMonitoring
             
             $sshOptions = '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5';
             $sshCmd = sprintf(
-                "sshpass -p '%s' ssh -p %d %s %s@%s %s 2>/dev/null",
-                $password,
+                "sshpass -p %s ssh -p %d %s %s@%s %s 2>/dev/null",
+                escapeshellarg($password),
                 $port,
                 $sshOptions,
                 $username,
@@ -1200,8 +1200,8 @@ class ServerMonitoring
             
             $sshOptions = '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5';
             $sshCmd = sprintf(
-                "sshpass -p '%s' ssh -p %d %s %s@%s %s 2>/dev/null",
-                $password,
+                "sshpass -p %s ssh -p %d %s %s@%s %s 2>/dev/null",
+                escapeshellarg($password),
                 $port,
                 $sshOptions,
                 $username,

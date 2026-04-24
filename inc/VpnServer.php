@@ -8,6 +8,13 @@ class VpnServer
 {
     private $serverId;
     private $data;
+    
+    /**
+     * Cache for docker sudo requirements per server.
+     * null = not tested, true = needs sudo, false = no sudo needed
+     * @var array<int, bool|null>
+     */
+    private static $dockerSudoCache = [];
 
     public function __construct(?int $serverId = null)
     {
@@ -427,8 +434,8 @@ class VpnServer
         } else {
             $sshOptions .= " -o PreferredAuthentications=password -o PubkeyAuthentication=no";
             $testCommand = sprintf(
-                "sshpass -p '%s' ssh -p %d %s %s@%s 'echo test' 2>/dev/null",
-                $this->data['password'],
+                "sshpass -p %s ssh -p %d %s %s@%s 'echo test' 2>/dev/null",
+                escapeshellarg($this->data['password']),
                 $this->data['port'],
                 $sshOptions,
                 $this->data['username'],
@@ -446,12 +453,23 @@ class VpnServer
     }
 
     /**
-     * Execute command on remote server
+     * Execute command on remote server.
+     *
+     * @param string $command The command to execute
+     * @param bool|null $sudo True = use sudo, false = no sudo, null = auto-detect for docker commands
+     * @return string The command output
      */
-    public function executeCommand(string $command, bool $sudo = false): string
+    public function executeCommand(string $command, bool $sudo = null): string
     {
         $baseCommand = $command;
         $pathPrefix = 'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; ';
+        $isDockerCommand = preg_match('/(^|\\n)docker(\\s|$)/', ltrim($baseCommand));
+        
+        // Auto-detect sudo requirement for docker commands when $sudo is null
+        if ($sudo === null && $isDockerCommand) {
+            $sudo = $this->detectDockerSudoRequirement();
+        }
+        
         $escapedCommand = '';
         $needsSudo = false;
 
@@ -477,7 +495,7 @@ class VpnServer
                 $escapedCommand
             );
         } else {
-            $needsSudo = $sudo && strtolower((string) ($this->data['username'] ?? '')) !== 'root';
+            $needsSudo = ($sudo ?? false) && strtolower((string) ($this->data['username'] ?? '')) !== 'root';
             if ($needsSudo) {
                 // Suppress sudo prompt text to keep command output machine-parseable.
                 $command = "echo '{$this->data['password']}' | sudo -S -p '' " . $command;
@@ -488,8 +506,8 @@ class VpnServer
 
             $sshOptions .= " -o PreferredAuthentications=password -o PubkeyAuthentication=no";
             $sshCommand = sprintf(
-                "sshpass -p '%s' ssh -p %d %s %s@%s %s 2>&1",
-                $this->data['password'],
+                "sshpass -p %s ssh -p %d %s %s@%s %s 2>&1",
+                escapeshellarg($this->data['password']),
                 $this->data['port'],
                 $sshOptions,
                 $this->data['username'],
@@ -504,13 +522,18 @@ class VpnServer
         if (
             empty($this->data['ssh_key'])
             && !empty($needsSudo)
-            && preg_match('/(^|\\n)docker(\\s|$)/', ltrim($baseCommand))
+            && $isDockerCommand
             && preg_match('/incorrect password attempts|sorry, try again|a password is required/i', $output)
         ) {
+            // Update cache: this server doesn't need sudo for docker
+            if ($this->serverId !== null) {
+                self::$dockerSudoCache[$this->serverId] = false;
+            }
+            
             $escapedBaseCommand = escapeshellarg($pathPrefix . $baseCommand);
             $sshCommandNoSudo = sprintf(
-                "sshpass -p '%s' ssh -p %d %s %s@%s %s 2>&1",
-                $this->data['password'],
+                "sshpass -p %s ssh -p %d %s %s@%s %s 2>&1",
+                escapeshellarg($this->data['password']),
                 $this->data['port'],
                 $sshOptions,
                 $this->data['username'],
@@ -525,6 +548,78 @@ class VpnServer
         }
 
         return $output;
+    }
+
+    /**
+     * Detect whether docker commands require sudo on this server.
+     * Uses a simple test command to check if docker works without sudo.
+     * Results are cached per server instance.
+     *
+     * @return bool True if sudo is needed, false if docker works without sudo
+     */
+    private function detectDockerSudoRequirement(): bool
+    {
+        // Return cached result if available
+        if ($this->serverId !== null && array_key_exists($this->serverId, self::$dockerSudoCache)) {
+            return self::$dockerSudoCache[$this->serverId];
+        }
+
+        // Test if docker works without sudo using a simple version check
+        $testCmd = 'docker --version 2>&1';
+        $pathPrefix = 'export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH; ';
+        
+        $sshOptions = '-o LogLevel=ERROR -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no';
+        $keyFile = '';
+
+        if (!empty($this->data['ssh_key'])) {
+            $keyFile = tempnam(sys_get_temp_dir(), 'sshkey');
+            file_put_contents($keyFile, self::normalizeSshKey($this->data['ssh_key']));
+            chmod($keyFile, 0600);
+            $sshOptions .= " -i {$keyFile} -o IdentitiesOnly=yes -o PubkeyAuthentication=yes -o PreferredAuthentications=publickey";
+
+            $preparedCommand = $pathPrefix . $testCmd;
+            $escapedCommand = escapeshellarg($preparedCommand);
+
+            $sshCommand = sprintf(
+                "ssh -p %d %s %s@%s %s 2>&1",
+                $this->data['port'],
+                $sshOptions,
+                $this->data['username'],
+                $this->data['host'],
+                $escapedCommand
+            );
+        } else {
+            // For password auth, first try without sudo
+            $preparedCommand = $pathPrefix . $testCmd;
+            $escapedCommand = escapeshellarg($preparedCommand);
+
+            $sshOptions .= " -o PreferredAuthentications=password -o PubkeyAuthentication=no";
+            $sshCommand = sprintf(
+                "sshpass -p %s ssh -p %d %s %s@%s %s 2>&1",
+                escapeshellarg($this->data['password']),
+                $this->data['port'],
+                $sshOptions,
+                $this->data['username'],
+                $this->data['host'],
+                $escapedCommand
+            );
+        }
+
+        $output = shell_exec($sshCommand) ?? '';
+
+        if ($keyFile && file_exists($keyFile)) {
+            unlink($keyFile);
+        }
+
+        // Check if docker command succeeded (output contains "version")
+        $dockerWorks = stripos($output, 'version') !== false;
+        
+        // Cache the result
+        if ($this->serverId !== null) {
+            self::$dockerSudoCache[$this->serverId] = !$dockerWorks;
+        }
+
+        return !$dockerWorks;
     }
 
     /**
