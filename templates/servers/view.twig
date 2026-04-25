@@ -98,6 +98,59 @@
                 {% if sp.server_host %}<span>Host: {{ sp.server_host }}</span>{% endif %}
                 {% if sp.server_port %}<span class="ml-2">Port: {{ sp.server_port }}</span>{% endif %}
               </div>
+              {% if sp.slug == 'cf-warp' %}
+              {# ── WARP Status Widget ── #}
+              <div id="warpStatusWidget" class="mt-3 p-3 rounded-lg" style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);">
+                <div class="flex items-center justify-between mb-2">
+                  <div class="flex items-center gap-2">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                      <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-1 17.93c-3.95-.49-7-3.85-7-7.93 0-.62.08-1.21.21-1.79L9 15v1c0 1.1.9 2 2 2v1.93zm6.9-2.54c-.26-.81-1-1.39-1.9-1.39h-1v-3c0-.55-.45-1-1-1H8v-2h2c.55 0 1-.45 1-1V7h2c1.1 0 2-.9 2-2v-.41c2.93 1.19 5 4.06 5 7.41 0 2.08-.8 3.97-2.1 5.39z" fill="#F59E0B"/>
+                    </svg>
+                    <span class="text-sm font-semibold text-white">Cloudflare WARP</span>
+                  </div>
+                  <div id="warpStatusBadge">
+                    <span class="px-2 py-0.5 rounded text-xs bg-gray-600 text-gray-300">
+                      <i class="fas fa-spinner fa-spin mr-1"></i>Загрузка...
+                    </span>
+                  </div>
+                </div>
+
+                <div id="warpDetails" class="space-y-1 text-xs">
+                  <div class="flex items-center justify-between text-gray-400">
+                    <span>Прокси</span>
+                    <span id="warpProxy" class="font-mono text-gray-300">—</span>
+                  </div>
+                  <div class="flex items-center justify-between text-gray-400">
+                    <span>WARP IP</span>
+                    <span id="warpExitIp" class="font-mono text-gray-300">—</span>
+                  </div>
+                  <div class="flex items-center justify-between text-gray-400">
+                    <span>Режим</span>
+                    <span id="warpMode" class="text-gray-300">—</span>
+                  </div>
+                  <div class="flex items-center justify-between text-gray-400">
+                    <span>Сервис</span>
+                    <span id="warpSvc" class="text-gray-300">—</span>
+                  </div>
+                </div>
+
+                <div class="flex gap-2 mt-3">
+                  <button id="warpBtnConnect" onclick="warpAction('connect')" class="flex-1 px-2 py-1 rounded text-xs font-medium text-white" style="background:#22c55e;opacity:0.9" disabled>
+                    <i class="fas fa-play mr-1"></i>Connect
+                  </button>
+                  <button id="warpBtnDisconnect" onclick="warpAction('disconnect')" class="flex-1 px-2 py-1 rounded text-xs font-medium text-white" style="background:#ef4444;opacity:0.9" disabled>
+                    <i class="fas fa-stop mr-1"></i>Disconnect
+                  </button>
+                  <button id="warpBtnReconnect" onclick="warpAction('reconnect')" class="flex-1 px-2 py-1 rounded text-xs font-medium text-white" style="background:#3b82f6;opacity:0.9" disabled>
+                    <i class="fas fa-sync-alt mr-1"></i>Reconnect
+                  </button>
+                </div>
+
+                <p class="text-[10px] text-gray-500 mt-2 leading-tight">
+                  ⚠️ WARP ~50-100 МБ RAM • Цепочка: Клиент → WG → WARP → CF → Интернет
+                </p>
+              </div>
+              {% endif %}
             </div>
           {% else %}
             <div class="text-sm text-gray-500">Нет установленных протоколов</div>
@@ -412,29 +465,42 @@ document.addEventListener('DOMContentLoaded', function() {
 
   if (uninstallAllBtn) {
     uninstallAllBtn.addEventListener('click', async function(e) {
-      console.log('uninstallAllBtn clicked');
       e.preventDefault();
       e.stopPropagation();
-      if (!confirm('Удалить все Amnezia-контейнеры на сервере?')) {
-        console.log('User canceled');
-        return;
-      }
-      console.log('Starting uninstall all...');
+      if (!confirm('Удалить все Amnezia-контейнеры на сервере?')) return;
+
+      const origHTML = uninstallAllBtn.innerHTML;
       uninstallAllBtn.disabled = true;
-      msg.innerHTML = '<i class="fas fa-circle-notch fa-spin text-red-600 mr-2"></i><span class="text-gray-700">Удаление всех контейнеров...</span>';
+      uninstallAllBtn.innerHTML = '<i class="fas fa-circle-notch fa-spin mr-1"></i>Удаление...';
+      uninstallAllBtn.className = uninstallAllBtn.className.replace('bg-gray-600', 'bg-yellow-600');
+      uninstallAllBtn.style.cursor = 'wait';
+      msg.innerHTML = '<div style="display:flex;align-items:center;gap:8px;padding:8px 12px;background:#fef3c7;border:1px solid #f59e0b;border-radius:6px;margin-top:4px;">' +
+        '<i class="fas fa-circle-notch fa-spin text-yellow-600"></i>' +
+        '<span style="color:#92400e;font-weight:500;">Удаление всех протоколов... Это может занять минуту</span></div>';
+
       try {
         const res = await fetch(`/servers/{{ server.id }}/protocols/uninstall-all`, { method: 'POST', credentials: 'same-origin' });
         const data = await res.json();
-        console.log('Response:', data);
         if (data.success) {
-          msg.textContent = data.message || 'Успешно';
+          uninstallAllBtn.innerHTML = '<i class="fas fa-check mr-1"></i>Удалено';
+          uninstallAllBtn.className = uninstallAllBtn.className.replace('bg-yellow-600', 'bg-green-600');
+          msg.innerHTML = '<div style="display:flex;align-items:center;gap:8px;padding:8px 12px;background:#d1fae5;border:1px solid #10b981;border-radius:6px;margin-top:4px;">' +
+            '<i class="fas fa-check-circle text-green-600"></i>' +
+            '<span style="color:#065f46;font-weight:500;">' + (data.message || 'Все протоколы удалены') + '</span></div>';
           setTimeout(() => location.reload(), 1200);
         } else {
-          msg.textContent = data.error || 'Ошибка';
+          uninstallAllBtn.innerHTML = origHTML;
+          uninstallAllBtn.className = uninstallAllBtn.className.replace('bg-yellow-600', 'bg-gray-600');
+          msg.innerHTML = '<div style="display:flex;align-items:center;gap:8px;padding:8px 12px;background:#fee2e2;border:1px solid #ef4444;border-radius:6px;margin-top:4px;">' +
+            '<i class="fas fa-exclamation-circle text-red-600"></i>' +
+            '<span style="color:#991b1b;">' + (data.error || 'Ошибка') + '</span></div>';
         }
       } catch (e) {
-        console.error('Error:', e);
-        msg.textContent = e.message;
+        uninstallAllBtn.innerHTML = origHTML;
+        uninstallAllBtn.className = uninstallAllBtn.className.replace('bg-yellow-600', 'bg-gray-600');
+        msg.innerHTML = '<div style="display:flex;align-items:center;gap:8px;padding:8px 12px;background:#fee2e2;border:1px solid #ef4444;border-radius:6px;margin-top:4px;">' +
+          '<i class="fas fa-exclamation-circle text-red-600"></i>' +
+          '<span style="color:#991b1b;">' + (e.message || 'Ошибка связи') + '</span></div>';
       }
       uninstallAllBtn.disabled = false;
     });
@@ -481,24 +547,71 @@ document.addEventListener('DOMContentLoaded', function() {
       if (!confirmed) return;
       const slug = btn.getAttribute('data-slug');
       const m = document.getElementById('uninstallSpMsg');
-      m.textContent = '';
-      btn.disabled = true;
-      m.innerHTML = '<i class="fas fa-circle-notch fa-spin text-red-600 mr-2"></i><span class="text-gray-700">Удаление протокола...</span>';
+      const card = btn.closest('.border.rounded');
+
+      // Save original button state
+      const origHTML = btn.innerHTML;
+      const origClasses = btn.className;
+
+      // Disable ALL uninstall buttons
+      document.querySelectorAll('.btn-uninstall-sp').forEach(b => { b.disabled = true; b.style.opacity = '0.5'; });
+
+      // Animate the clicked button
+      btn.style.opacity = '1';
+      btn.innerHTML = '<i class="fas fa-circle-notch fa-spin mr-1"></i>Удаление...';
+      btn.className = btn.className.replace('bg-red-600', 'bg-yellow-600');
+      btn.style.cursor = 'wait';
+      btn.style.minWidth = btn.offsetWidth + 'px';
+
+      // Add overlay to protocol card
+      if (card) {
+        card.style.position = 'relative';
+        const overlay = document.createElement('div');
+        overlay.id = 'uninstall-overlay-' + slug;
+        overlay.style.cssText = 'position:absolute;inset:0;background:rgba(239,68,68,0.05);border-radius:inherit;pointer-events:none;z-index:5;';
+        card.appendChild(overlay);
+        card.style.transition = 'opacity 0.3s';
+        card.style.opacity = '0.7';
+      }
+
+      // Show progress message
+      m.innerHTML = '<div style="display:flex;align-items:center;gap:8px;padding:8px 12px;background:#fef3c7;border:1px solid #f59e0b;border-radius:6px;margin-top:8px;">' +
+        '<i class="fas fa-circle-notch fa-spin text-yellow-600"></i>' +
+        '<span style="color:#92400e;font-weight:500;">Удаление <b>' + slug + '</b>... Это может занять до 30 секунд</span></div>';
+
       try {
         const resp = await fetch('/servers/{{ server.id }}/protocols/' + encodeURIComponent(slug) + '/uninstall', { method: 'POST', credentials: 'same-origin' });
         let data;
         const ct = resp.headers.get('content-type') || '';
         if (ct.includes('application/json')) { data = await resp.json(); } else { data = { error: await resp.text() }; }
         if (resp.ok && data && !data.error) {
-          m.textContent = 'Удалено. Клиенты: ' + (data.clients_removed || 0);
-          setTimeout(() => location.reload(), 800);
+          // Success state
+          btn.innerHTML = '<i class="fas fa-check mr-1"></i>Удалено';
+          btn.className = btn.className.replace('bg-yellow-600', 'bg-green-600');
+          if (card) { card.style.opacity = '0.4'; }
+          m.innerHTML = '<div style="display:flex;align-items:center;gap:8px;padding:8px 12px;background:#d1fae5;border:1px solid #10b981;border-radius:6px;margin-top:8px;">' +
+            '<i class="fas fa-check-circle text-green-600"></i>' +
+            '<span style="color:#065f46;font-weight:500;">Протокол удалён. Клиенты: ' + (data.clients_removed || 0) + '</span></div>';
+          setTimeout(() => location.reload(), 1200);
         } else {
-          m.textContent = (data && data.error) ? data.error : ('Ошибка удаления (' + resp.status + ')');
+          // Error state
+          btn.innerHTML = '<i class="fas fa-times mr-1"></i>Ошибка';
+          btn.className = origClasses;
+          if (card) { card.style.opacity = '1'; const ov = document.getElementById('uninstall-overlay-' + slug); if (ov) ov.remove(); }
+          m.innerHTML = '<div style="display:flex;align-items:center;gap:8px;padding:8px 12px;background:#fee2e2;border:1px solid #ef4444;border-radius:6px;margin-top:8px;">' +
+            '<i class="fas fa-exclamation-circle text-red-600"></i>' +
+            '<span style="color:#991b1b;">' + ((data && data.error) ? data.error : ('Ошибка (' + resp.status + ')')) + '</span></div>';
+          setTimeout(() => { btn.innerHTML = origHTML; document.querySelectorAll('.btn-uninstall-sp').forEach(b => { b.disabled = false; b.style.opacity = '1'; }); }, 3000);
         }
-      } catch (e) {
-        m.textContent = e.message || 'Ошибка связи';
+      } catch (err) {
+        btn.innerHTML = '<i class="fas fa-times mr-1"></i>Ошибка';
+        btn.className = origClasses;
+        if (card) { card.style.opacity = '1'; const ov = document.getElementById('uninstall-overlay-' + slug); if (ov) ov.remove(); }
+        m.innerHTML = '<div style="display:flex;align-items:center;gap:8px;padding:8px 12px;background:#fee2e2;border:1px solid #ef4444;border-radius:6px;margin-top:8px;">' +
+          '<i class="fas fa-exclamation-circle text-red-600"></i>' +
+          '<span style="color:#991b1b;">' + (err.message || 'Ошибка связи') + '</span></div>';
+        setTimeout(() => { btn.innerHTML = origHTML; document.querySelectorAll('.btn-uninstall-sp').forEach(b => { b.disabled = false; b.style.opacity = '1'; }); }, 3000);
       }
-      btn.disabled = false;
     });
   });
 
@@ -567,6 +680,92 @@ async function syncAllStats(serverId) {
     alert('Error: ' + error.message);
   }
 }
+
+// ── WARP Status Widget ──
+function updateWarpWidget(data) {
+  const badge = document.getElementById('warpStatusBadge');
+  const proxy = document.getElementById('warpProxy');
+  const exitIp = document.getElementById('warpExitIp');
+  const mode = document.getElementById('warpMode');
+  const svc = document.getElementById('warpSvc');
+  const btnConnect = document.getElementById('warpBtnConnect');
+  const btnDisconnect = document.getElementById('warpBtnDisconnect');
+  const btnReconnect = document.getElementById('warpBtnReconnect');
+
+  if (!badge) return;
+
+  if (!data.installed) {
+    badge.innerHTML = '<span class="px-2 py-0.5 rounded text-xs bg-gray-600 text-gray-300">Не установлен</span>';
+    return;
+  }
+
+  if (data.connected) {
+    badge.innerHTML = '<span class="px-2 py-0.5 rounded text-xs text-white" style="background:#22c55e"><i class="fas fa-check-circle mr-1"></i>Connected</span>';
+  } else {
+    badge.innerHTML = '<span class="px-2 py-0.5 rounded text-xs text-white" style="background:#ef4444"><i class="fas fa-times-circle mr-1"></i>Disconnected</span>';
+  }
+
+  if (proxy) proxy.textContent = data.proxy_listening ? ('socks5h://127.0.0.1:' + (data.proxy_port || 40000)) : '—';
+  if (exitIp) exitIp.textContent = data.warp_ip || '—';
+  if (mode) mode.textContent = data.mode || '—';
+  if (svc) svc.textContent = data.service_status || '—';
+
+  if (btnConnect) { btnConnect.disabled = false; }
+  if (btnDisconnect) { btnDisconnect.disabled = false; }
+  if (btnReconnect) { btnReconnect.disabled = false; }
+}
+
+async function loadWarpStatus() {
+  const widget = document.getElementById('warpStatusWidget');
+  if (!widget) return;
+  try {
+    const res = await fetch('/servers/{{ server.id }}/warp/status', { credentials: 'same-origin' });
+    const data = await res.json();
+    if (data.success !== false) {
+      updateWarpWidget(data);
+    }
+  } catch (e) {
+    console.error('WARP status error:', e);
+  }
+}
+
+async function warpAction(action) {
+  const btnConnect = document.getElementById('warpBtnConnect');
+  const btnDisconnect = document.getElementById('warpBtnDisconnect');
+  const btnReconnect = document.getElementById('warpBtnReconnect');
+  if (btnConnect) btnConnect.disabled = true;
+  if (btnDisconnect) btnDisconnect.disabled = true;
+  if (btnReconnect) btnReconnect.disabled = true;
+
+  const badge = document.getElementById('warpStatusBadge');
+  if (badge) badge.innerHTML = '<span class="px-2 py-0.5 rounded text-xs bg-gray-600 text-gray-300"><i class="fas fa-spinner fa-spin mr-1"></i>' + action + '...</span>';
+
+  try {
+    const res = await fetch('/servers/{{ server.id }}/warp/action', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: action })
+    });
+    const data = await res.json();
+    if (data.success !== false) {
+      updateWarpWidget(data);
+    } else {
+      if (badge) badge.innerHTML = '<span class="px-2 py-0.5 rounded text-xs bg-red-600 text-white">' + (data.error || 'Ошибка') + '</span>';
+    }
+  } catch (e) {
+    if (badge) badge.innerHTML = '<span class="px-2 py-0.5 rounded text-xs bg-red-600 text-white">' + e.message + '</span>';
+  }
+  if (btnConnect) btnConnect.disabled = false;
+  if (btnDisconnect) btnDisconnect.disabled = false;
+  if (btnReconnect) btnReconnect.disabled = false;
+}
+
+// WARP auto-refresh
+document.addEventListener('DOMContentLoaded', function() {
+  loadWarpStatus();
+  setInterval(loadWarpStatus, 30000);
+});
 
 // Load backups on page load
 document.addEventListener('DOMContentLoaded', function() {

@@ -763,6 +763,71 @@ Router::post('/servers/{id}/protocols/activate', function ($params) {
     }
 });
 
+// Get WARP status for a server (AJAX)
+Router::get('/servers/{id}/warp/status', function ($params) {
+    requireAuth();
+    header('Content-Type: application/json');
+    $serverId = (int) $params['id'];
+    try {
+        $server = new VpnServer($serverId);
+        $serverData = $server->getData();
+        $user = Auth::user();
+        if ($serverData['user_id'] != $user['id'] && !Auth::isAdmin()) {
+            http_response_code(403);
+            echo json_encode(['error' => 'Forbidden']);
+            return;
+        }
+        $status = InstallProtocolManager::getWarpStatus($server);
+        echo json_encode(array_merge(['success' => true], $status));
+    } catch (Exception $e) {
+        http_response_code(500);
+        echo json_encode(['success' => false, 'error' => $e->getMessage()]);
+    }
+});
+
+// WARP actions: connect/disconnect/reconnect (AJAX)
+Router::post('/servers/{id}/warp/action', function ($params) {
+    requireAdmin();
+    header('Content-Type: application/json');
+    $serverId = (int) $params['id'];
+    $input = json_decode(file_get_contents('php://input'), true);
+    $action = $input['action'] ?? '';
+    if (!in_array($action, ['connect', 'disconnect', 'reconnect'], true)) {
+        http_response_code(400);
+        echo json_encode(['error' => 'Invalid action. Allowed: connect, disconnect, reconnect']);
+        return;
+    }
+    try {
+        $server = new VpnServer($serverId);
+        $serverData = $server->getData();
+        $user = Auth::user();
+        if ($serverData['user_id'] != $user['id'] && !Auth::isAdmin()) {
+            http_response_code(403);
+            echo json_encode(['error' => 'Forbidden']);
+            return;
+        }
+        switch ($action) {
+            case 'connect':
+                $server->executeCommand('warp-cli --accept-tos connect 2>/dev/null', true);
+                break;
+            case 'disconnect':
+                $server->executeCommand('warp-cli --accept-tos disconnect 2>/dev/null', true);
+                break;
+            case 'reconnect':
+                $server->executeCommand('warp-cli --accept-tos disconnect 2>/dev/null || true', true);
+                sleep(1);
+                $server->executeCommand('warp-cli --accept-tos connect 2>/dev/null', true);
+                break;
+        }
+        sleep(2);
+        $status = InstallProtocolManager::getWarpStatus($server);
+        echo json_encode(array_merge(['success' => true, 'action' => $action], $status));
+    } catch (Exception $e) {
+        http_response_code(500);
+        echo json_encode(['success' => false, 'error' => $e->getMessage()]);
+    }
+});
+
 // View server
 Router::get('/servers/{id}', function ($params) {
     requireAuth();

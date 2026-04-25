@@ -31,6 +31,7 @@ Web-based management panel for Amnezia AWG (WireGuard) VPN servers.
 - MTProxy (Telegram) (`mtproxy`)
 - SMB Server (`smb`)
 - AIVPN (`aivpn`) - https://github.com/infosave2007/aivpn
+- Cloudflare WARP Proxy (`cf-warp`) — transparent traffic proxying via Cloudflare
 
 
 ## Requirements
@@ -204,6 +205,19 @@ Manage VPN protocols via **Settings → Protocols**:
 - Install/Uninstall protocols (WireGuard, AmneziaWG, OpenVPN, etc.)
 - Configure protocol settings (ports, transport, obfuscation)
 - **AI Assistant**: Use "Ask AI" to generate complex protocol configurations tailored to your needs (requires OpenRouter API key).
+
+### Cloudflare WARP Proxy
+
+WARP transparently proxies **all TCP traffic** from VPN clients through the Cloudflare network, hiding the server's real IP address.
+
+> **⚠️ Install WARP last** — after all other protocols (AWG, X-Ray, AIVPN, etc.). During installation, WARP automatically detects active VPN containers and interfaces and configures routing for each of them.
+
+**Supported protocols:**
+- **AWG / AWG2** — routing via container IP + host redsocks
+- **X-Ray VLESS** — `warp-out` outbound via SOCKS5 in X-Ray config
+- **AIVPN / WireGuard** — routing via host-level iptables + redsocks
+
+**Verification:** connect to VPN and open `https://1.1.1.1/cdn-cgi/trace` — the field `warp=on` confirms it's working.
 
 ### Scenario Testing & Logs
 

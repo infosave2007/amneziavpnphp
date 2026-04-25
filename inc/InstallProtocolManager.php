@@ -289,24 +289,18 @@ class InstallProtocolManager
 
     private static function detect(VpnServer $server, array $protocol, array $options = []): array
     {
-        $engine = self::getEngine($protocol);
-        if ($engine === 'builtin_awg') {
-            return self::detectBuiltinAwg($server, $protocol);
+        $handler = self::resolveHandler($protocol);
+
+        switch ($handler) {
+            case 'awg':
+                return self::detectBuiltinAwg($server, $protocol);
+            case 'xray':
+                return self::detectBuiltinXray($server, $protocol);
+            case 'warp':
+                return self::detectBuiltinWarp($server, $protocol);
+            default:
+                return self::runScript($server, $protocol, 'detect', $options);
         }
-
-        $slug = $protocol['slug'] ?? '';
-
-        // For AWG shell-based scenarios (amnezia-wg, amnezia-wg-advanced), use builtin AWG detection
-        if (self::isAwgProtocol($slug, $protocol)) {
-            return self::detectBuiltinAwg($server, $protocol);
-        }
-
-        // For X-Ray VLESS, use builtin detection
-        if ($slug === 'xray-vless') {
-            return self::detectBuiltinXray($server, $protocol);
-        }
-
-        return self::runScript($server, $protocol, 'detect', $options);
     }
 
     public static function install(VpnServer $server, array $protocol, array $options = []): array
@@ -397,30 +391,22 @@ class InstallProtocolManager
 
     private static function restore(VpnServer $server, array $protocol, array $detection, array $options = []): array
     {
-        $engine = self::getEngine($protocol);
-        if ($engine === 'builtin_awg') {
-            return self::restoreBuiltinAwg($server, $protocol, $detection, $options);
-        }
+        $handler = self::resolveHandler($protocol);
 
-        $slug = $protocol['slug'] ?? '';
-
-        // For AWG shell-based scenarios, use builtin AWG restore
-        if (self::isAwgProtocol($slug, $protocol)) {
-            return self::restoreBuiltinAwg($server, $protocol, $detection, $options);
+        switch ($handler) {
+            case 'awg':
+                return self::restoreBuiltinAwg($server, $protocol, $detection, $options);
+            case 'xray':
+                return self::restoreBuiltinXray($server, $protocol, $detection, $options);
+            default:
+                $result = self::runScript($server, $protocol, 'restore', array_merge($options, [
+                    'detection' => $detection
+                ]));
+                if (!isset($result['success'])) {
+                    $result['success'] = true;
+                }
+                return $result;
         }
-
-        // For X-Ray VLESS, use builtin restore
-        if ($slug === 'xray-vless') {
-            return self::restoreBuiltinXray($server, $protocol, $detection, $options);
-        }
-
-        $result = self::runScript($server, $protocol, 'restore', array_merge($options, [
-            'detection' => $detection
-        ]));
-        if (!isset($result['success'])) {
-            $result['success'] = true;
-        }
-        return $result;
     }
 
     private static function detectBuiltinAwg(VpnServer $server, array $protocol): array
@@ -1245,29 +1231,77 @@ class InstallProtocolManager
         return $row;
     }
 
-    private static function getEngine(array $protocol): string
+    /**
+     * ──────────────────────────────────────────────────────────────────
+     * PROTOCOL HANDLER REGISTRY
+     * ──────────────────────────────────────────────────────────────────
+     * Central dispatcher that determines which builtin handler manages
+     * a given protocol. Every dispatch point (detect, install, uninstall)
+     * MUST use this method instead of ad-hoc slug/regex checks.
+     *
+     * Returns one of:
+     *   'awg'    – AmneziaWG / AWG variants (Docker container based)
+     *   'warp'   – Cloudflare WARP (systemd service, host-level)
+     *   'xray'   – X-Ray VLESS (Docker container based)
+     *   'script' – Generic script-driven protocol (install/uninstall via shell)
+     *
+     * Priority order:
+     *   1. Explicit slug match (highest priority, cannot be overridden)
+     *   2. Engine field from protocol definition
+     *   3. Heuristic: install_script content analysis (lowest priority)
+     */
+    private static function resolveHandler(array $protocol): string
     {
-        $definition = $protocol['definition'] ?? [];
-        if (!empty($protocol['install_script'])) {
-            return 'shell';
+        $slug = $protocol['slug'] ?? '';
+
+        // ── 1. Explicit slug → handler mapping (always wins) ──
+        static $slugMap = [
+            // WARP
+            'cf-warp'               => 'warp',
+            'cloudflare-warp'       => 'warp',
+            // X-Ray
+            'xray-vless'            => 'xray',
+            // AWG variants
+            'amnezia-wg'            => 'awg',
+            'amnezia-wg-advanced'   => 'awg',
+            'awg2'                  => 'awg',
+        ];
+
+        if (isset($slugMap[$slug])) {
+            return $slugMap[$slug];
         }
-        return $definition['engine'] ?? 'builtin_awg';
+
+        // ── 2. Engine from definition ──
+        $definition = $protocol['definition'] ?? [];
+        $engine = $definition['engine'] ?? '';
+        if ($engine === 'builtin_awg') {
+            return 'awg';
+        }
+
+        // ── 3. Heuristic: AWG Docker image in install_script ──
+        // Only check if no explicit slug/engine match above
+        if (empty($protocol['install_script'])) {
+            // No install_script and no engine → default to AWG (legacy behavior)
+            return 'awg';
+        }
+
+        $installScript = (string) $protocol['install_script'];
+        if (preg_match('/amneziavpn\/amnezia-wg|docker\s.*amnezia-awg/i', $installScript)) {
+            return 'awg';
+        }
+
+        // ── 4. Fallback: generic script protocol ──
+        return 'script';
     }
 
     /**
-     * Check if a protocol is an AWG variant (by slug or install_script content)
-     * Used to route shell-based AWG scenarios to builtin AWG detection/restore
+     * Legacy compatibility: get engine string
      */
-    private static function isAwgProtocol(string $slug, array $protocol): bool
+    private static function getEngine(array $protocol): string
     {
-        if (in_array($slug, ['amnezia-wg', 'amnezia-wg-advanced', 'awg2'], true)) {
-            return true;
-        }
-        $installScript = (string) ($protocol['install_script'] ?? '');
-        if ($installScript !== '' && preg_match('/amneziavpn\/amnezia-wg|amnezia\/awg|amnezia-awg/i', $installScript)) {
-            return true;
-        }
-        return false;
+        $handler = self::resolveHandler($protocol);
+        if ($handler === 'awg') return 'builtin_awg';
+        return 'shell';
     }
 
     private static function fallbackProtocols(): array
@@ -1338,24 +1372,18 @@ class InstallProtocolManager
      */
     public static function runDetection(VpnServer $server, array $protocol, array $options = []): array
     {
-        $engine = self::getEngine($protocol);
-        if ($engine === 'builtin_awg') {
-            return self::detectBuiltinAwg($server, $protocol);
+        $handler = self::resolveHandler($protocol);
+
+        switch ($handler) {
+            case 'awg':
+                return self::detectBuiltinAwg($server, $protocol);
+            case 'xray':
+                return self::detectBuiltinXray($server, $protocol);
+            case 'warp':
+                return self::detectBuiltinWarp($server, $protocol);
+            default:
+                return self::runScript($server, $protocol, 'detect', $options);
         }
-
-        $slug = $protocol['slug'] ?? '';
-
-        // For AWG shell-based scenarios (amnezia-wg, amnezia-wg-advanced), use builtin AWG detection
-        if (self::isAwgProtocol($slug, $protocol)) {
-            return self::detectBuiltinAwg($server, $protocol);
-        }
-
-        // For X-Ray VLESS, use builtin detection
-        if ($slug === 'xray-vless') {
-            return self::detectBuiltinXray($server, $protocol);
-        }
-
-        return self::runScript($server, $protocol, 'detect', $options);
     }
 
     /**
@@ -1364,27 +1392,29 @@ class InstallProtocolManager
      */
     public static function uninstall(VpnServer $server, array $protocol, array $options = []): array
     {
-        $engine = self::getEngine($protocol);
-        if ($engine === 'builtin_awg') {
-            return self::uninstallBuiltinAwg($server, $protocol, $options);
-        }
+        $slug = $protocol['slug'] ?? 'unknown';
+        $handler = self::resolveHandler($protocol);
+        Logger::appendInstall($server->getId(), 'UNINSTALL: slug=' . $slug . ' handler=' . $handler);
 
-        // For script-driven protocols, try to detect AWG scenario and fallback to builtin uninstall
-        $slug = $protocol['slug'] ?? '';
-        if (self::isAwgProtocol($slug, $protocol)) {
-            // Prefer builtin AWG uninstall by default because script variants may have CRLF issues
-            // or leave behind the canonical container name, causing install conflicts.
-            if (!empty($options['use_script_uninstall'])) {
-                $hasScript = isset($protocol['uninstall_script']) && trim((string) $protocol['uninstall_script']) !== '';
-                if ($hasScript) {
-                    return self::runScript($server, $protocol, 'uninstall', $options);
+        switch ($handler) {
+            case 'warp':
+                return self::uninstallBuiltinWarp($server, $protocol, $options);
+
+            case 'awg':
+                // Prefer builtin AWG uninstall; script variant only on explicit request
+                if (!empty($options['use_script_uninstall'])) {
+                    $hasScript = isset($protocol['uninstall_script']) && trim((string) $protocol['uninstall_script']) !== '';
+                    if ($hasScript) {
+                        return self::runScript($server, $protocol, 'uninstall', $options);
+                    }
                 }
-            }
-            return self::uninstallBuiltinAwg($server, $protocol, $options);
-        }
+                return self::uninstallBuiltinAwg($server, $protocol, $options);
 
-        // For other script-driven protocols, look for an "uninstall" phase in scripts
-        return self::runScript($server, $protocol, 'uninstall', $options);
+            case 'xray':
+            case 'script':
+            default:
+                return self::runScript($server, $protocol, 'uninstall', $options);
+        }
     }
 
     private static function uninstallBuiltinAwg(VpnServer $server, array $protocol, array $options = []): array
@@ -1450,8 +1480,9 @@ class InstallProtocolManager
 
             // ── Check for existing installation before doing anything destructive ──
             $slug = $protocol['slug'] ?? '';
-            $isAwg = $engine === 'builtin_awg' || self::isAwgProtocol($slug, $protocol);
-            $isXray = $slug === 'xray-vless';
+            $handler = self::resolveHandler($protocol);
+            $isAwg = $handler === 'awg';
+            $isXray = $handler === 'xray';
 
             if ($isAwg) {
                 $detection = self::detectBuiltinAwg($server, $protocol);
@@ -1488,6 +1519,17 @@ class InstallProtocolManager
                     Logger::appendInstall($serverId, 'Existing X-Ray installation detected, restoring instead of reinstalling');
                     $restoreResult = self::restoreBuiltinXray($server, $protocol, $xrayDetection, $options);
                     return array_merge($restoreResult, ['mode' => 'restore_existing']);
+                }
+            }
+
+            // For Cloudflare WARP — always run install script even if WARP binary exists
+            // because the script is idempotent and handles redsocks/iptables setup
+            if (self::resolveHandler($protocol) === 'warp') {
+                $warpDetection = self::detectBuiltinWarp($server, $protocol);
+                Logger::appendInstall($serverId, 'WARP detect result: status=' . ($warpDetection['status'] ?? 'null'));
+                if (($warpDetection['status'] ?? '') === 'existing') {
+                    Logger::appendInstall($serverId, 'Existing WARP found, running install script anyway for redsocks/iptables setup');
+                    // Don't return — fall through to run the install script
                 }
             }
 
@@ -1671,6 +1713,12 @@ class InstallProtocolManager
                     self::markServerActive($serverId, null, ['vpn_port' => $port]);
                 }
             }
+
+            // ── WARP: Auto-patch X-Ray outbound to route through WARP ──
+            if (self::resolveHandler($protocol) === 'warp') {
+                self::patchXrayForWarp($server);
+            }
+
             return $res;
         } catch (Throwable $e) {
             $message = (string) $e->getMessage();
@@ -2606,5 +2654,521 @@ class InstallProtocolManager
         }
 
         Logger::appendInstall($serverId, "AWG client import complete: imported {$imported} clients");
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Cloudflare WARP — builtin detection, uninstall, status
+    // WARP runs as a systemd service (warp-svc), NOT as a Docker container
+    // ─────────────────────────────────────────────────────────────────
+
+    /**
+     * Detect existing Cloudflare WARP installation on the server
+     */
+    private static function detectBuiltinWarp(VpnServer $server, array $protocol): array
+    {
+        $metadata = $protocol['definition']['metadata'] ?? [];
+        $proxyPort = $metadata['proxy_port'] ?? 40000;
+
+        // Check if warp-cli binary exists
+        $warpCliCheck = trim($server->executeCommand('command -v warp-cli 2>/dev/null || echo ""', true));
+        if ($warpCliCheck === '') {
+            return [
+                'status' => 'absent',
+                'message' => 'Cloudflare WARP не установлен на сервере'
+            ];
+        }
+
+        // Check warp-svc service status
+        $svcStatus = trim($server->executeCommand('systemctl is-active warp-svc 2>/dev/null || echo "inactive"', true));
+
+        // Get WARP connection status
+        $warpStatus = trim($server->executeCommand('warp-cli --accept-tos status 2>/dev/null || echo "error"', true));
+
+        $isConnected = (bool) preg_match('/Connected/i', $warpStatus);
+        $isRegistered = !preg_match('/Registration Missing|unregistered/i', $warpStatus);
+
+        if (!$isRegistered) {
+            return [
+                'status' => 'partial',
+                'message' => 'WARP установлен, но не зарегистрирован',
+                'details' => [
+                    'warp_cli' => $warpCliCheck,
+                    'service_status' => $svcStatus,
+                    'warp_status' => $warpStatus,
+                ]
+            ];
+        }
+
+        // Get WARP mode
+        $warpMode = '';
+        if (preg_match('/Mode:\s*(\S+)/i', $warpStatus, $m)) {
+            $warpMode = $m[1];
+        }
+
+        // Get WARP account info
+        $accountInfo = trim($server->executeCommand('warp-cli --accept-tos registration show 2>/dev/null || echo ""', true));
+        $accountId = '';
+        if (preg_match('/Account\s*ID[:\s]+([a-zA-Z0-9-]+)/i', $accountInfo, $m)) {
+            $accountId = $m[1];
+        }
+
+        // Check if proxy port is listening
+        $portListening = trim($server->executeCommand(
+            'ss -tlnp 2>/dev/null | grep ":' . (int) $proxyPort . '" | head -1 || echo ""', true
+        ));
+
+        // Get WARP IP (best-effort)
+        $warpIp = '';
+        if ($isConnected && $portListening !== '') {
+            $traceOut = trim($server->executeCommand(
+                'curl -x socks5h://127.0.0.1:' . (int) $proxyPort . ' -s --max-time 5 https://cloudflare.com/cdn-cgi/trace 2>/dev/null || echo ""', true
+            ));
+            if (preg_match('/ip=([^\s]+)/', $traceOut, $m)) {
+                $warpIp = $m[1];
+            }
+        }
+
+        return [
+            'status' => 'existing',
+            'message' => 'Cloudflare WARP установлен и ' . ($isConnected ? 'подключён' : 'отключён'),
+            'details' => [
+                'warp_cli' => $warpCliCheck,
+                'service_status' => $svcStatus,
+                'warp_status_raw' => $warpStatus,
+                'connected' => $isConnected,
+                'registered' => $isRegistered,
+                'warp_mode' => $warpMode,
+                'warp_proxy_port' => (int) $proxyPort,
+                'warp_ip' => $warpIp,
+                'warp_account' => $accountId,
+                'port_listening' => $portListening !== '',
+                'summary' => sprintf(
+                    'WARP %s, mode=%s, proxy=%s:%d%s',
+                    $isConnected ? 'connected' : 'disconnected',
+                    $warpMode ?: 'unknown',
+                    '127.0.0.1',
+                    (int) $proxyPort,
+                    $warpIp !== '' ? ', exit_ip=' . $warpIp : ''
+                )
+            ]
+        ];
+    }
+
+    /**
+     * Uninstall Cloudflare WARP from the server (systemd service, not Docker)
+     */
+    private static function uninstallBuiltinWarp(VpnServer $server, array $protocol, array $options = []): array
+    {
+        $serverId = $server->getId();
+        Logger::appendInstall($serverId, 'Uninstalling Cloudflare WARP (full cleanup)...');
+
+        try {
+            // Run entire uninstall as a single remote script to avoid SSH escaping issues
+            $script = <<<'BASH'
+#!/bin/bash
+echo "WARP_UNINSTALL_START"
+
+# 1. Restore X-Ray config
+XRAY_NAME=$(docker ps 2>/dev/null | grep -i xray | awk '{ print $NF }' | head -1)
+if [ -n "$XRAY_NAME" ]; then
+  # Try server.json first (actual runtime config), then config.json
+  XRAY_CFG_PATH=""
+  for P in /opt/amnezia/xray/server.json /etc/xray/config.json; do
+    CONTENT=$(docker exec "$XRAY_NAME" cat "$P" 2>/dev/null || echo "")
+    if [ -n "$CONTENT" ] && echo "$CONTENT" | grep -q "warp-out"; then
+      XRAY_CFG_PATH="$P"
+      XRAY_CFG="$CONTENT"
+      break
+    fi
+  done
+  if [ -n "$XRAY_CFG_PATH" ]; then
+    echo "$XRAY_CFG" | python3 -c "
+import sys, json
+try:
+    cfg = json.load(sys.stdin)
+    cfg['outbounds'] = [o for o in cfg.get('outbounds',[]) if o.get('tag') != 'warp-out']
+    if 'routing' in cfg:
+        cfg['routing']['rules'] = [r for r in cfg['routing'].get('rules',[]) if r.get('outboundTag') != 'warp-out']
+        if not cfg['routing']['rules']: del cfg['routing']
+    print(json.dumps(cfg, indent=2))
+except: pass
+" 2>/dev/null | docker exec -i "$XRAY_NAME" tee "$XRAY_CFG_PATH" > /dev/null 2>&1
+    docker restart "$XRAY_NAME" 2>/dev/null || true
+    echo "xray_restored"
+  fi
+fi
+
+# 2. Remove DNAT rules
+DOCKER_GW=$(docker network inspect bridge 2>/dev/null | grep Gateway | head -1 | awk -F'"' '{print $4}')
+if [ -z "$DOCKER_GW" ]; then DOCKER_GW="172.17.0.1"; fi
+iptables -t nat -D OUTPUT -d "$DOCKER_GW" -p tcp --dport 40000 -j DNAT --to-destination 127.0.0.1:40000 2>/dev/null || true
+iptables -t nat -D PREROUTING -d "$DOCKER_GW" -p tcp --dport 40000 -j DNAT --to-destination 127.0.0.1:40000 2>/dev/null || true
+iptables -t nat -D PREROUTING -d "$DOCKER_GW" -p tcp --dport 40000 -j DNAT --to-destination 127.0.0.1:40000 2>/dev/null || true
+echo "dnat_removed"
+
+# 3. Remove REDSOCKS_WARP chain
+SUBNETS=$(cat /var/lib/cloudflare-warp/routed_subnets 2>/dev/null || echo "10.8.1.0/24 10.0.0.0/24")
+for S in $SUBNETS; do
+  iptables -t nat -D PREROUTING -s "$S" -p tcp -j REDSOCKS_WARP 2>/dev/null || true
+done
+iptables -t nat -F REDSOCKS_WARP 2>/dev/null || true
+iptables -t nat -X REDSOCKS_WARP 2>/dev/null || true
+echo "iptables_cleaned"
+
+# 4. Remove redsocks
+systemctl stop redsocks-warp 2>/dev/null || true
+systemctl disable redsocks-warp 2>/dev/null || true
+rm -f /etc/systemd/system/redsocks-warp.service
+rm -rf /etc/redsocks
+systemctl daemon-reload 2>/dev/null || true
+echo "redsocks_removed"
+
+# 5. Disconnect and remove WARP
+warp-cli --accept-tos disconnect 2>/dev/null || true
+warp-cli --accept-tos registration delete 2>/dev/null || true
+systemctl stop warp-svc 2>/dev/null || true
+systemctl disable warp-svc 2>/dev/null || true
+DEBIAN_FRONTEND=noninteractive apt-get remove -y cloudflare-warp >/dev/null 2>&1 || true
+apt-get autoremove -y >/dev/null 2>&1 || true
+echo "warp_removed"
+
+# 6. Cleanup
+rm -rf /var/lib/cloudflare-warp 2>/dev/null || true
+rm -f /etc/apt/sources.list.d/cloudflare-client.list 2>/dev/null || true
+rm -f /usr/share/keyrings/cloudflare-warp-archive-keyring.gpg 2>/dev/null || true
+rm -f /etc/sysctl.d/99-warp.conf 2>/dev/null || true
+sysctl -w net.ipv4.conf.docker0.route_localnet=0 2>/dev/null || true
+sysctl -w net.ipv4.conf.all.route_localnet=0 2>/dev/null || true
+
+# 7. Save iptables
+mkdir -p /etc/iptables
+iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+
+echo "WARP_UNINSTALL_DONE"
+BASH;
+
+            Logger::appendInstall($serverId, 'WARP uninstall: writing script to server...');
+            $b64 = base64_encode($script);
+            // Phase 1: write script file
+            $server->executeCommand("echo " . $b64 . " | base64 -d > /tmp/_warp_uninstall.sh && chmod +x /tmp/_warp_uninstall.sh", true);
+            Logger::appendInstall($serverId, 'WARP uninstall: executing script...');
+            // Phase 2: execute script
+            $output = $server->executeCommand("bash /tmp/_warp_uninstall.sh 2>&1; rm -f /tmp/_warp_uninstall.sh", true);
+            $outputStr = (string) $output;
+            Logger::appendInstall($serverId, 'WARP uninstall output: ' . substr(str_replace(["\r", "\n"], ' ', $outputStr), 0, 500));
+
+            $success = strpos($outputStr, 'WARP_UNINSTALL_DONE') !== false;
+
+            if ($success) {
+                Logger::appendInstall($serverId, 'WARP uninstalled successfully (full cleanup)');
+            } else {
+                Logger::appendInstall($serverId, 'WARP uninstall script may have partially failed');
+            }
+
+            return [
+                'success' => $success,
+                'message' => $success ? 'Cloudflare WARP удалён' : 'WARP удалён частично, проверьте логи',
+                'mode' => 'uninstall'
+            ];
+        } catch (Throwable $e) {
+            Logger::appendInstall($serverId, 'WARP uninstall exception: ' . $e->getMessage());
+            throw new Exception('WARP uninstall failed: ' . $e->getMessage());
+        }
+    }
+
+    /**
+     * Remove WARP outbound and routing rules from X-Ray config
+     * Restores X-Ray to direct (freedom) outbound mode
+     */
+    private static function unpatchXrayFromWarp(VpnServer $server): void
+    {
+        $serverId = $server->getId();
+
+        try {
+            $xrayContainer = trim($server->executeCommand(
+                'docker ps 2>/dev/null | grep -i xray | awk \'{ print $NF }\' | head -1 || echo ""', true
+            ));
+            if ($xrayContainer === '') {
+                Logger::appendInstall($serverId, 'WARP uninstall: no X-Ray container, skipping config restore');
+                return;
+            }
+
+            $containerArg = escapeshellarg($xrayContainer);
+            $configRaw = trim($server->executeCommand(
+                "docker exec -i {$containerArg} cat /etc/xray/config.json 2>/dev/null", true
+            ));
+            if ($configRaw === '') {
+                return;
+            }
+
+            $config = json_decode($configRaw, true);
+            if (!is_array($config)) {
+                return;
+            }
+
+            // Remove warp-out outbound
+            $outbounds = $config['outbounds'] ?? [];
+            $hadWarp = false;
+            $newOutbounds = [];
+            foreach ($outbounds as $ob) {
+                if (($ob['tag'] ?? '') === 'warp-out') {
+                    $hadWarp = true;
+                    continue; // skip warp-out
+                }
+                $newOutbounds[] = $ob;
+            }
+
+            if (!$hadWarp) {
+                Logger::appendInstall($serverId, 'WARP uninstall: X-Ray has no warp-out outbound, nothing to restore');
+                return;
+            }
+
+            $config['outbounds'] = $newOutbounds;
+
+            // Remove warp routing rules
+            if (isset($config['routing']['rules']) && is_array($config['routing']['rules'])) {
+                $newRules = [];
+                foreach ($config['routing']['rules'] as $rule) {
+                    if (($rule['outboundTag'] ?? '') === 'warp-out') {
+                        continue; // skip warp routing rule
+                    }
+                    $newRules[] = $rule;
+                }
+                $config['routing']['rules'] = $newRules;
+
+                // If routing is empty, remove it entirely for clean config
+                if (empty($config['routing']['rules'])) {
+                    unset($config['routing']);
+                }
+            }
+
+            // Write back config
+            $newConfig = json_encode($config, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+            $b64Config = base64_encode($newConfig);
+            $server->executeCommand(
+                "echo {$b64Config} | base64 -d | docker exec -i {$containerArg} tee /etc/xray/config.json > /dev/null", true
+            );
+
+            // Restart X-Ray
+            $server->executeCommand("docker restart {$containerArg} 2>/dev/null || true", true);
+
+            Logger::appendInstall($serverId, 'WARP uninstall: X-Ray config restored (warp-out removed), container restarted');
+
+        } catch (\Throwable $e) {
+            Logger::appendInstall($serverId, 'WARP uninstall: X-Ray restore failed (non-fatal): ' . $e->getMessage());
+        }
+    }
+
+    /**
+     * Get WARP runtime status from a server (used by API endpoint)
+     * Returns connection status, proxy port, exit IP, and account info
+     */
+    public static function getWarpStatus(VpnServer $server): array
+    {
+        $warpCliCheck = trim($server->executeCommand('command -v warp-cli 2>/dev/null || echo ""', true));
+        if ($warpCliCheck === '') {
+            return [
+                'installed' => false,
+                'connected' => false,
+                'message' => 'WARP не установлен'
+            ];
+        }
+
+        $svcStatus = trim($server->executeCommand('systemctl is-active warp-svc 2>/dev/null || echo "inactive"', true));
+        $warpStatus = trim($server->executeCommand('warp-cli --accept-tos status 2>/dev/null || echo "error"', true));
+        $isConnected = (bool) preg_match('/Connected/i', $warpStatus);
+
+        $warpMode = '';
+        if (preg_match('/Mode:\s*(\S+)/i', $warpStatus, $m)) {
+            $warpMode = $m[1];
+        }
+
+        // Get proxy port from settings
+        $proxyPortRaw = trim($server->executeCommand('warp-cli --accept-tos settings 2>/dev/null | grep -i "proxy port" || echo ""', true));
+        $proxyPort = 40000;
+        if (preg_match('/(\d+)/', $proxyPortRaw, $m)) {
+            $proxyPort = (int) $m[1];
+        }
+
+        $warpIp = '';
+        $portListening = false;
+        if ($isConnected) {
+            $portCheck = trim($server->executeCommand(
+                'ss -tlnp 2>/dev/null | grep ":' . $proxyPort . '" | head -1 || echo ""', true
+            ));
+            $portListening = $portCheck !== '';
+
+            if ($portListening) {
+                $traceOut = trim($server->executeCommand(
+                    'curl -x socks5h://127.0.0.1:' . $proxyPort . ' -s --max-time 5 https://cloudflare.com/cdn-cgi/trace 2>/dev/null || echo ""', true
+                ));
+                if (preg_match('/ip=([^\s]+)/', $traceOut, $m)) {
+                    $warpIp = $m[1];
+                }
+            }
+        }
+
+        return [
+            'installed' => true,
+            'connected' => $isConnected,
+            'service_status' => $svcStatus,
+            'mode' => $warpMode,
+            'proxy_port' => $proxyPort,
+            'proxy_listening' => $portListening,
+            'warp_ip' => $warpIp,
+            'warp_status_raw' => $warpStatus,
+        ];
+    }
+
+    /**
+     * Auto-patch X-Ray config to route outbound traffic through WARP SOCKS5 proxy
+     * X-Ray runs in Docker bridge mode, so we need:
+     * 1. iptables DNAT: docker_gateway:40000 → 127.0.0.1:40000
+     * 2. X-Ray outbound: socks5 → docker_gateway:40000
+     */
+    private static function patchXrayForWarp(VpnServer $server): void
+    {
+        $serverId = $server->getId();
+
+        try {
+            // Find X-Ray container
+            $xrayContainer = trim($server->executeCommand(
+                'docker ps 2>/dev/null | grep -i xray | awk \'{ print $NF }\' | head -1 || echo ""', true
+            ));
+            if ($xrayContainer === '') {
+                Logger::appendInstall($serverId, 'WARP X-Ray patch: no X-Ray container found, skipping');
+                return;
+            }
+
+            Logger::appendInstall($serverId, 'WARP X-Ray patch: found container ' . $xrayContainer);
+
+            // Get Docker bridge gateway IP
+            $dockerGw = trim($server->executeCommand(
+                'docker network inspect bridge 2>/dev/null | grep Gateway | head -1 | sed \'s/.*"Gateway"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/\' || echo "172.17.0.1"', true
+            ));
+            if ($dockerGw === '') {
+                $dockerGw = '172.17.0.1';
+            }
+
+            // Setup iptables DNAT so Docker containers can reach WARP via gateway IP
+            $server->executeCommand(
+                'iptables -t nat -D OUTPUT -d ' . escapeshellarg($dockerGw) . ' -p tcp --dport 40000 -j DNAT --to-destination 127.0.0.1:40000 2>/dev/null || true', true
+            );
+            $server->executeCommand(
+                'iptables -t nat -A OUTPUT -d ' . escapeshellarg($dockerGw) . ' -p tcp --dport 40000 -j DNAT --to-destination 127.0.0.1:40000 2>/dev/null || true', true
+            );
+            // Also allow in PREROUTING for container-originated traffic
+            $server->executeCommand(
+                'iptables -t nat -D PREROUTING -d ' . escapeshellarg($dockerGw) . ' -p tcp --dport 40000 -j DNAT --to-destination 127.0.0.1:40000 2>/dev/null || true', true
+            );
+            $server->executeCommand(
+                'iptables -t nat -A PREROUTING -d ' . escapeshellarg($dockerGw) . ' -p tcp --dport 40000 -j DNAT --to-destination 127.0.0.1:40000 2>/dev/null || true', true
+            );
+            Logger::appendInstall($serverId, 'WARP X-Ray patch: iptables DNAT ' . $dockerGw . ':40000 → 127.0.0.1:40000');
+
+            // Enable route_localnet so DNAT to 127.0.0.1 works for Docker container traffic
+            $server->executeCommand('sysctl -w net.ipv4.conf.docker0.route_localnet=1 2>/dev/null || true', true);
+            $server->executeCommand('sysctl -w net.ipv4.conf.all.route_localnet=1 2>/dev/null || true', true);
+            $server->executeCommand('grep -q route_localnet /etc/sysctl.d/99-warp.conf 2>/dev/null || { mkdir -p /etc/sysctl.d; echo "net.ipv4.conf.docker0.route_localnet=1" >> /etc/sysctl.d/99-warp.conf; echo "net.ipv4.conf.all.route_localnet=1" >> /etc/sysctl.d/99-warp.conf; }', true);
+
+            // Read X-Ray config — try /opt/amnezia/xray/server.json first (actual runtime config),
+            // fall back to /etc/xray/config.json (Docker volume mount)
+            $containerArg = escapeshellarg($xrayContainer);
+            $xrayConfigPath = '/opt/amnezia/xray/server.json';
+            $configRaw = trim($server->executeCommand(
+                "docker exec -i {$containerArg} cat {$xrayConfigPath} 2>/dev/null", true
+            ));
+            if ($configRaw === '' || $configRaw === 'cat: can\'t open') {
+                $xrayConfigPath = '/etc/xray/config.json';
+                $configRaw = trim($server->executeCommand(
+                    "docker exec -i {$containerArg} cat {$xrayConfigPath} 2>/dev/null", true
+                ));
+            }
+            if ($configRaw === '') {
+                Logger::appendInstall($serverId, 'WARP X-Ray patch: could not read X-Ray config');
+                return;
+            }
+            Logger::appendInstall($serverId, 'WARP X-Ray patch: using config ' . $xrayConfigPath);
+
+            $config = json_decode($configRaw, true);
+            if (!is_array($config)) {
+                Logger::appendInstall($serverId, 'WARP X-Ray patch: config.json is not valid JSON');
+                return;
+            }
+
+            // Check if warp-out already exists
+            $outbounds = $config['outbounds'] ?? [];
+            foreach ($outbounds as $ob) {
+                if (($ob['tag'] ?? '') === 'warp-out') {
+                    Logger::appendInstall($serverId, 'WARP X-Ray patch: warp-out outbound already exists');
+                    return;
+                }
+            }
+
+            // Tag existing freedom outbound as "direct" if not tagged
+            foreach ($outbounds as &$ob) {
+                if (($ob['protocol'] ?? '') === 'freedom' && empty($ob['tag'])) {
+                    $ob['tag'] = 'direct';
+                }
+            }
+            unset($ob);
+
+            // Add warp-out SOCKS5 outbound
+            $outbounds[] = [
+                'tag' => 'warp-out',
+                'protocol' => 'socks',
+                'settings' => [
+                    'servers' => [
+                        [
+                            'address' => $dockerGw,
+                            'port' => 40000
+                        ]
+                    ]
+                ]
+            ];
+
+            $config['outbounds'] = $outbounds;
+
+            // Set default routing: all traffic through warp-out
+            if (!isset($config['routing'])) {
+                $config['routing'] = [];
+            }
+            if (!isset($config['routing']['rules'])) {
+                $config['routing']['rules'] = [];
+            }
+
+            // Add rule: route everything through warp-out (as first rule)
+            $hasWarpRule = false;
+            foreach ($config['routing']['rules'] as $rule) {
+                if (($rule['outboundTag'] ?? '') === 'warp-out') {
+                    $hasWarpRule = true;
+                    break;
+                }
+            }
+            if (!$hasWarpRule) {
+                // Add catch-all rule at end to route through WARP
+                $config['routing']['rules'][] = [
+                    'type' => 'field',
+                    'outboundTag' => 'warp-out',
+                    'network' => 'tcp,udp'
+                ];
+            }
+
+            // Write back config
+            $newConfig = json_encode($config, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+            $b64Config = base64_encode($newConfig);
+            $server->executeCommand(
+                "echo {$b64Config} | base64 -d | docker exec -i {$containerArg} tee {$xrayConfigPath} > /dev/null", true
+            );
+
+            // Restart X-Ray container
+            $server->executeCommand("docker restart {$containerArg} 2>/dev/null || true", true);
+
+            Logger::appendInstall($serverId, 'WARP X-Ray patch: outbound added to ' . $xrayConfigPath . ', container restarted');
+
+        } catch (\Throwable $e) {
+            Logger::appendInstall($serverId, 'WARP X-Ray patch failed (non-fatal): ' . $e->getMessage());
+            // Non-fatal — WARP still works for AWG clients
+        }
     }
 }
