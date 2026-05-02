@@ -794,6 +794,7 @@ class VpnClient
     /**
      * Generate client keys on remote server
      */
+
     private static function generateClientKeys(array $serverData, string $clientName): array
     {
         $containerName = $serverData['container_name'];
@@ -801,41 +802,59 @@ class VpnClient
         $isAwg2 = (stripos($containerName, 'awg2') !== false || $protocolSlug === 'awg2');
         $wgTool = $isAwg2 ? 'awg' : 'wg';
 
-        $cmd = sprintf(
-            "docker exec -i %s sh -lc 'set -e; umask 077; priv=\$(%s genkey | tr -d " . '"' . "\\r\\n" . '"' . "); [ -n \"\$priv\" ] || { echo empty_private_key; exit 1; }; pub=\$(printf " . '"' . "%%s\\n" . '"' . " \"\$priv\" | %s pubkey | tr -d " . '"' . "\\r\\n" . '"' . "); [ -n \"\$pub\" ] || { echo empty_public_key; exit 1; }; printf " . '"' . "%%s\\n---\\n%%s\\n" . '"' . " \"\$priv\" \"\$pub\"'",
+        $innerCmd = "set -e; umask 077; " .
+                    "priv=$(" . $wgTool . " genkey | tr -d '\\r\\n'); " .
+                    "[ -n \"\$priv\" ] || { echo empty_private_key; exit 1; }; " .
+                    "pub=$(printf \"%s\\n\" \"\$priv\" | " . $wgTool . " pubkey | tr -d '\\r\\n'); " .
+                    "[ -n \"\$pub\" ] || { echo empty_public_key; exit 1; }; " .
+                    "printf \"%s---%s\" \"\$priv\" \"\$pub\"";
+
+        $dockerCmd = sprintf(
+            "docker exec -i %s sh -c %s",
             escapeshellarg($containerName),
-            $wgTool,
-            $wgTool
+            escapeshellarg($innerCmd)
         );
 
-        $escaped = escapeshellarg($cmd);
-        $sshCmd = sprintf(
-            "sshpass -p %s ssh -p %d -q -o LogLevel=ERROR -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o PreferredAuthentications=password -o PubkeyAuthentication=no %s@%s %s 2>&1",
-            escapeshellarg($serverData['password']),
-            $serverData['port'],
-            $serverData['username'],
-            $serverData['host'],
-            $escaped
-        );
+        $keyFile = null;
+        $sshOptions = "-o ConnectTimeout=10 -o LogLevel=ERROR -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no";
 
-        $out = (string) shell_exec($sshCmd);
-        $parts = explode("---", trim($out));
+        // 2. Логика выбора: Ключ или Пароль (как в твоем примере)
+        if (!empty($serverData['ssh_key'])) {
+            $keyFile = tempnam(sys_get_temp_dir(), 'sshkey');
+            // Используем твой статический метод нормализации
+            file_put_contents($keyFile, VpnServer::normalizeSshKey($serverData['ssh_key']));
+            chmod($keyFile, 0600);
 
-        if (count($parts) < 2) {
-            $head = substr(trim((string) $out), 0, 240);
-            throw new Exception("Failed to generate client keys" . ($head !== '' ? (": " . $head) : ''));
+            $sshOptions .= " -i " . escapeshellarg($keyFile) . " -o IdentitiesOnly=yes -o PubkeyAuthentication=yes -o PreferredAuthentications=publickey";
+            $sshCommand = sprintf("ssh -p %d %s %s@%s %s 2>&1",
+                $serverData['port'], $sshOptions, $serverData['username'], $serverData['host'], escapeshellarg($dockerCmd)
+            );
+        } else {
+            $sshOptions .= " -o PreferredAuthentications=password -o PubkeyAuthentication=no";
+            $sshCommand = sprintf("sshpass -p %s ssh -p %d %s %s@%s %s 2>&1",
+                escapeshellarg($serverData['password']), $serverData['port'], $sshOptions, $serverData['username'], $serverData['host'], escapeshellarg($dockerCmd)
+            );
         }
 
-        $private = trim((string) $parts[0]);
-        $public = trim((string) $parts[1]);
-        if ($private === '' || $public === '') {
-            throw new Exception('Failed to generate client keys: empty key output');
-        }
+        // 3. Выполнение
+        try {
+            $out = shell_exec($sshCommand);
+            $parts = explode("---", trim((string)$out));
 
-        return [
-            'private' => $private,
-            'public' => $public
-        ];
+            if (count($parts) < 2) {
+                throw new Exception("Key generation failed: " . ($out ?: "No response") . " | CMD: " . $sshCommand);
+            }
+
+            return [
+                'private' => trim($parts[0]),
+                'public' => trim($parts[1])
+            ];
+        } finally {
+            // Очистка временного файла
+            if ($keyFile && file_exists($keyFile)) {
+                unlink($keyFile);
+            }
+        }
     }
 
     /**
@@ -861,7 +880,7 @@ class VpnClient
             $containerName = $serverData['container_name'] ?? 'amnezia-awg';
             $server = new VpnServer($serverData['id']);
             $cmd = sprintf(
-                "docker exec %s cat /opt/amnezia/awg/wg0.conf 2>/dev/null",
+                "docker exec %s cat /opt/amnezia/awg/awg0.conf 2>/dev/null",
                 escapeshellarg($containerName)
             );
             $serverConfig = $server->executeCommand($cmd, true);
@@ -966,9 +985,9 @@ class VpnClient
             return null;
         }
 
-        // wg show wg0 dump peer line format:
+        // wg show awg0 dump peer line format:
         // public_key \t preshared_key \t endpoint \t allowed_ips \t latest_handshake \t rx \t tx \t keepalive
-        $cmdDump = sprintf('docker exec %s wg show wg0 dump 2>/dev/null || true', escapeshellarg($containerName));
+        $cmdDump = sprintf('docker exec %s wg show awg0 dump 2>/dev/null || true', escapeshellarg($containerName));
         $dump = (string) $server->executeCommand($cmdDump, true);
         foreach (preg_split('/\r?\n/', trim($dump)) as $line) {
             if ($line === '') {
@@ -1004,47 +1023,47 @@ class VpnClient
 
         try {
             // Try to get public key from wg show
-            $pubKeyCmd = "docker exec $containerName wg show wg0 2>/dev/null | grep 'public key:' | awk '{print \$3}'";
+            $pubKeyCmd = "docker exec $containerName wg show awg0 2>/dev/null | grep 'public key:' | awk '{print \$3}'";
             $pubKey = trim($server->executeCommand($pubKeyCmd, true));
 
             // Get listening port
-            $portCmd = "docker exec $containerName wg show wg0 2>/dev/null | grep 'listening port:' | awk '{print \$3}'";
+            $portCmd = "docker exec $containerName wg show awg0 2>/dev/null | grep 'listening port:' | awk '{print \$3}'";
             $port = trim($server->executeCommand($portCmd, true));
 
             // PresharedKey is stored per-peer, and in this project we persist it in wireguard_psk.key.
-            // Prefer that file (stable) and fall back to parsing the first peer PSK from wg0.conf.
+            // Prefer that file (stable) and fall back to parsing the first peer PSK from awg0.conf.
             $psk = '';
 
             $pskKeyFileCmd = "docker exec $containerName sh -c \"cat $primaryConfigDir/wireguard_psk.key 2>/dev/null || cat /opt/amnezia/awg/wireguard_psk.key 2>/dev/null || true\"";
             $psk = trim($server->executeCommand($pskKeyFileCmd, true));
 
             if ($psk === '') {
-                $pskFromConfCmd = "docker exec $containerName sh -c \"grep -E '^[[:space:]]*PresharedKey[[:space:]]*=' $primaryConfigDir/wg0.conf 2>/dev/null | head -1 | sed -E 's/^[[:space:]]*PresharedKey[[:space:]]*=[[:space:]]*//' | tr -d '\\r'\" 2>/dev/null || true";
+                $pskFromConfCmd = "docker exec $containerName sh -c \"grep -E '^[[:space:]]*PresharedKey[[:space:]]*=' $primaryConfigDir/awg0.conf 2>/dev/null | head -1 | sed -E 's/^[[:space:]]*PresharedKey[[:space:]]*=[[:space:]]*//' | tr -d '\\r'\" 2>/dev/null || true";
                 $psk = trim($server->executeCommand($pskFromConfCmd, true));
             }
 
             if ($psk === '' && $primaryConfigDir !== '/opt/amnezia/awg') {
-                $pskFromAwgConfCmd = "docker exec $containerName sh -c \"grep -E '^[[:space:]]*PresharedKey[[:space:]]*=' /opt/amnezia/awg/wg0.conf 2>/dev/null | head -1 | sed -E 's/^[[:space:]]*PresharedKey[[:space:]]*=[[:space:]]*//' | tr -d '\\r'\" 2>/dev/null || true";
+                $pskFromAwgConfCmd = "docker exec $containerName sh -c \"grep -E '^[[:space:]]*PresharedKey[[:space:]]*=' /opt/amnezia/awg/awg0.conf 2>/dev/null | head -1 | sed -E 's/^[[:space:]]*PresharedKey[[:space:]]*=[[:space:]]*//' | tr -d '\\r'\" 2>/dev/null || true";
                 $psk = trim($server->executeCommand($pskFromAwgConfCmd, true));
             }
 
             if ($psk === '') {
-                $pskFromAltConfCmd = "docker exec $containerName sh -c \"grep -E '^[[:space:]]*PresharedKey[[:space:]]*=' /etc/wireguard/wg0.conf 2>/dev/null | head -1 | sed -E 's/^[[:space:]]*PresharedKey[[:space:]]*=[[:space:]]*//' | tr -d '\\r'\" 2>/dev/null || true";
+                $pskFromAltConfCmd = "docker exec $containerName sh -c \"grep -E '^[[:space:]]*PresharedKey[[:space:]]*=' /etc/wireguard/awg0.conf 2>/dev/null | head -1 | sed -E 's/^[[:space:]]*PresharedKey[[:space:]]*=[[:space:]]*//' | tr -d '\\r'\" 2>/dev/null || true";
                 $psk = trim($server->executeCommand($pskFromAltConfCmd, true));
             }
 
             // Extract DNS from config
-            $dnsCmd = "docker exec $containerName sh -c \"grep -E '^DNS' $primaryConfigDir/wg0.conf 2>/dev/null | head -1 | cut -d= -f2 | tr -d '[:space:]'\" 2>/dev/null || echo ''";
+            $dnsCmd = "docker exec $containerName sh -c \"grep -E '^DNS' $primaryConfigDir/awg0.conf 2>/dev/null | head -1 | cut -d= -f2 | tr -d '[:space:]'\" 2>/dev/null || echo ''";
             $dns = trim($server->executeCommand($dnsCmd, true));
 
             if (empty($dns) && $primaryConfigDir !== '/opt/amnezia/awg') {
-                $dnsAwgCmd = "docker exec $containerName sh -c \"grep -E '^DNS' /opt/amnezia/awg/wg0.conf 2>/dev/null | head -1 | cut -d= -f2 | tr -d '[:space:]'\" 2>/dev/null || echo ''";
+                $dnsAwgCmd = "docker exec $containerName sh -c \"grep -E '^DNS' /opt/amnezia/awg/awg0.conf 2>/dev/null | head -1 | cut -d= -f2 | tr -d '[:space:]'\" 2>/dev/null || echo ''";
                 $dns = trim($server->executeCommand($dnsAwgCmd, true));
             }
 
             if (empty($dns)) {
                 // Try alternative config location
-                $dnsCmd2 = "docker exec $containerName sh -c \"grep -E '^DNS' /etc/wireguard/wg0.conf 2>/dev/null | head -1 | cut -d= -f2 | tr -d '[:space:]'\" 2>/dev/null || echo ''";
+                $dnsCmd2 = "docker exec $containerName sh -c \"grep -E '^DNS' /etc/wireguard/awg0.conf 2>/dev/null | head -1 | cut -d= -f2 | tr -d '[:space:]'\" 2>/dev/null || echo ''";
                 $dns = trim($server->executeCommand($dnsCmd2, true));
             }
 
@@ -1055,11 +1074,11 @@ class VpnClient
 
             // Extract AWG parameters.
             // NOTE: amnezia-awg does not expose these via `wg show` in many builds,
-            // so we primarily read them from /opt/amnezia/awg/wg0.conf.
+            // so we primarily read them from /opt/amnezia/awg/awg0.conf.
             $awgParams = [];
 
             // Legacy attempt: some builds print jc/jmin/... in `wg show` output.
-            $wgShowCmd = "docker exec $containerName wg show wg0 2>/dev/null";
+            $wgShowCmd = "docker exec $containerName wg show awg0 2>/dev/null";
             $wgOutput = (string) $server->executeCommand($wgShowCmd, true);
             $paramNames = ['jc', 'jmin', 'jmax', 's1', 's2', 's3', 's4', 'h1', 'h2', 'h3', 'h4', 'i1', 'i2', 'i3', 'i4', 'i5'];
             foreach ($paramNames as $param) {
@@ -1076,14 +1095,14 @@ class VpnClient
                 }
             }
 
-            // Primary source: wg0.conf
+            // Primary source: awg0.conf
             if (empty($awgParams)) {
-                $awgParams = self::extractAwgParamsFromWg0Conf($server, $containerName, $primaryConfigDir . '/wg0.conf');
+                $awgParams = self::extractAwgParamsFromWg0Conf($server, $containerName, $primaryConfigDir . '/awg0.conf');
                 if (empty($awgParams) && $primaryConfigDir !== '/opt/amnezia/awg') {
-                    $awgParams = self::extractAwgParamsFromWg0Conf($server, $containerName, '/opt/amnezia/awg/wg0.conf');
+                    $awgParams = self::extractAwgParamsFromWg0Conf($server, $containerName, '/opt/amnezia/awg/awg0.conf');
                 }
                 if (empty($awgParams)) {
-                    $awgParams = self::extractAwgParamsFromWg0Conf($server, $containerName, '/etc/wireguard/wg0.conf');
+                    $awgParams = self::extractAwgParamsFromWg0Conf($server, $containerName, '/etc/wireguard/awg0.conf');
                 }
             }
 
@@ -1198,10 +1217,10 @@ class VpnClient
         $configDir = '/opt/amnezia/awg';
 
         // AWG2: try awg0.conf first (standard), fall back to wg0.conf (legacy panel installs)
-        $configFile = $isAwg2 ? 'awg0.conf' : 'wg0.conf';
+        $configFile = $isAwg2 ? 'awg0.conf' : 'awg0.conf';
         $testConf = trim(self::executeServerCommand($serverData, "docker exec -i {$containerName} cat {$configDir}/{$configFile} 2>/dev/null", true));
         if ($isAwg2 && ($testConf === '' || strpos($testConf, '[Interface]') === false)) {
-            $configFile = 'wg0.conf';
+            $configFile = 'awg0.conf';
         }
         // Interface name matches config filename (wg0.conf -> wg0, awg0.conf -> awg0)
         $ifaceName = str_replace('.conf', '', $configFile);
@@ -1295,33 +1314,66 @@ class VpnClient
     /**
      * Execute command on server
      */
+
     private static function executeServerCommand(array $serverData, string $command, bool $sudo = false): string
     {
-        $needsSudo = $sudo && strtolower((string) ($serverData['username'] ?? '')) !== 'root';
+        $username = strtolower((string)($serverData['username'] ?? ''));
+        $needsSudo = $sudo && $username !== 'root';
         $baseCommand = $command;
 
         if ($needsSudo) {
-            // Suppress sudo prompt noise in stdout to keep parser output stable.
-            $command = "echo '{$serverData['password']}' | sudo -S -p '' " . $command;
+            // Используем пароль для sudo, если он есть
+            $pass = $serverData['password'] ?? '';
+            $command = "echo " . escapeshellarg($pass) . " | sudo -S -p '' " . $command;
         }
 
         $run = static function (string $cmd) use ($serverData): string {
-            $escapedCommand = escapeshellarg($cmd);
-            $sshCommand = sprintf(
-                "sshpass -p %s ssh  -p %d -q -o LogLevel=ERROR -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o PreferredAuthentications=password -o PubkeyAuthentication=no %s@%s %s 2>&1",
-                escapeshellarg($serverData['password']),
-                $serverData['port'],
-                $serverData['username'],
-                $serverData['host'],
-                $escapedCommand
-            );
+            $keyFile = null;
+            $sshOptions = "-o ConnectTimeout=15 -o LogLevel=ERROR -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no";
 
-            return shell_exec($sshCommand) ?? '';
+            if (!empty($serverData['ssh_key'])) {
+                // ЛОГИКА С КЛЮЧОМ
+                $keyFile = tempnam(sys_get_temp_dir(), 'sshkey_exec');
+                // Вызываем нормализацию из VpnServer
+                $normalizedKey = VpnServer::normalizeSshKey($serverData['ssh_key']);
+                file_put_contents($keyFile, $normalizedKey);
+                chmod($keyFile, 0600);
+
+                $sshOptions .= " -i " . escapeshellarg($keyFile) . " -o IdentitiesOnly=yes -o PubkeyAuthentication=yes -o PreferredAuthentications=publickey";
+                $sshCommand = sprintf(
+                    "ssh -p %d %s %s@%s %s 2>&1",
+                    (int)$serverData['port'],
+                    $sshOptions,
+                    escapeshellarg($serverData['username']),
+                    escapeshellarg($serverData['host']),
+                    escapeshellarg($cmd)
+                );
+            } else {
+                // ЛОГИКА С ПАРОЛЕМ (старая)
+                $sshOptions .= " -o PreferredAuthentications=password -o PubkeyAuthentication=no";
+                $sshCommand = sprintf(
+                    "sshpass -p %s ssh -p %d %s %s@%s %s 2>&1",
+                    escapeshellarg($serverData['password'] ?? ''),
+                    (int)$serverData['port'],
+                    $sshOptions,
+                    escapeshellarg($serverData['username']),
+                    escapeshellarg($serverData['host']),
+                    escapeshellarg($cmd)
+                );
+            }
+
+            try {
+                return (string)shell_exec($sshCommand);
+            } finally {
+                if ($keyFile && file_exists($keyFile)) {
+                    unlink($keyFile);
+                }
+            }
         };
 
         $output = $run($command);
 
-        // If sudo auth fails but docker is available without sudo (docker group), retry without sudo.
+        // Обработка случая, если sudo не сработал, но docker может работать без него
         if (
             $needsSudo
             && preg_match('/(^|\\n)docker(\\s|$)/', ltrim($baseCommand))
@@ -1545,13 +1597,13 @@ class VpnClient
 
         // AWG2: try awg0.conf first (standard), fall back to wg0.conf (legacy panel installs)
         $isAwg2 = (stripos($containerName, 'awg2') !== false || $protocolSlug === 'awg2');
-        $configFile = $isAwg2 ? 'awg0.conf' : 'wg0.conf';
+        $configFile = $isAwg2 ? 'awg0.conf' : 'awg0.conf';
         $testConf = trim(self::executeServerCommand($serverData, "docker exec -i {$containerName} cat {$configDir}/{$configFile} 2>/dev/null", true));
         if ($isAwg2 && ($testConf === '' || strpos($testConf, '[Interface]') === false)) {
-            $configFile = 'wg0.conf';
+            $configFile = 'awg0.conf';
         }
         $ifaceName = str_replace('.conf', '', $configFile);
-        $wgTool = $isAwg2 ? 'awg' : 'wg';
+        $wgTool = $isAwg2 ? 'awg' : 'awg';
 
         // First, remove using wg/awg command (live removal)
         $removeCmd = sprintf(
@@ -1749,7 +1801,7 @@ class VpnClient
             }
         }
 
-        // If AWG params are missing (common after reinstall), fetch them directly from wg0.conf
+        // If AWG params are missing (common after reinstall), fetch them directly from awg0.conf
         // to avoid falling back to template defaults that will not match the server.
         if (in_array($slug, ['amnezia-wg-advanced', 'awg2'], true)) {
             $needKeys = ['JC', 'JMIN', 'JMAX', 'S1', 'S2', 'H1', 'H2', 'H3', 'H4'];
@@ -1764,9 +1816,9 @@ class VpnClient
             if ($missing) {
                 $containerName = $serverData['container_name'] ?? ($slug === 'awg2' ? 'amnezia-awg2' : 'amnezia-awg');
                 $configDir = $slug === 'awg2' ? '/opt/amnezia/awg2' : '/opt/amnezia/awg';
-                $direct = self::extractAwgParamsFromWg0Conf($server, $containerName, $configDir . '/wg0.conf');
+                $direct = self::extractAwgParamsFromWg0Conf($server, $containerName, $configDir . '/awg0.conf');
                 if (empty($direct)) {
-                    $direct = self::extractAwgParamsFromWg0Conf($server, $containerName, '/etc/wireguard/wg0.conf');
+                    $direct = self::extractAwgParamsFromWg0Conf($server, $containerName, '/etc/wireguard/awg0.conf');
                 }
 
                 if (!empty($direct)) {
@@ -2272,7 +2324,7 @@ class VpnClient
         $containerName = $serverData['container_name'];
 
         // Get WireGuard interface stats
-        $cmd = sprintf("docker exec -i %s wg show wg0 dump", $containerName);
+        $cmd = sprintf("docker exec -i %s wg show awg0 dump", $containerName);
         $output = self::executeServerCommand($serverData, $cmd, true);
 
         $stats = [
