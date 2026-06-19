@@ -7,14 +7,19 @@
 SCRIPT_PATH="/var/www/html/bin/collect_metrics.php"
 LOG_FILE="/var/log/metrics_monitor.log"
 PID_FILE="/var/run/collect_metrics.pid"
-LOCK_FILE="/var/run/collect_metrics.lock"
+# IMPORTANT: the monitor MUST use a DIFFERENT lock file than the collector.
+# collect_metrics.php flock()s /var/run/collect_metrics.lock itself. If the monitor
+# held that same lock, the collector it starts would inherit the monitor's locked fd
+# and its own flock() would fail, so it exited immediately — the daemon never stayed
+# alive and metrics were never collected.
+MONITOR_LOCK_FILE="/var/run/metrics_monitor.lock"
 
 log_message() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"
 }
 
-# Use flock to prevent multiple monitor instances
-exec 200>"$LOCK_FILE"
+# Use flock to prevent multiple monitor instances (on the monitor's OWN lock file)
+exec 200>"$MONITOR_LOCK_FILE"
 if ! flock -n 200; then
     log_message "Another monitor instance is running, exiting"
     exit 0
@@ -43,7 +48,9 @@ is_running() {
 # Start the metrics collector
 start_collector() {
     log_message "Starting metrics collector..."
-    /usr/local/bin/php "$SCRIPT_PATH" >> /var/log/metrics_collector.log 2>&1 &
+    # Detach from the monitor (setsid) and close the monitor's lock fd (200>&-) so the
+    # collector neither holds the monitor lock nor inherits any unexpected flock.
+    setsid /usr/local/bin/php "$SCRIPT_PATH" >> /var/log/metrics_collector.log 2>&1 200>&- </dev/null &
     echo $! > "$PID_FILE"
     log_message "Metrics collector started with PID: $(cat $PID_FILE)"
 }
