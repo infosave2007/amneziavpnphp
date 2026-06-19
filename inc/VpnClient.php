@@ -76,16 +76,26 @@ class VpnClient
         }
         $isWireguard = in_array($slug, ['amnezia-wg-advanced', 'wireguard-standard', 'amnezia-wg', 'awg2'], true);
 
-        // Auto-sync server keys from container EVERY TIME for WireGuard protocols
-        // This ensures we always use current container configuration even if it was recreated
-        if ($isWireguard) {
-            try {
-                // For multi-protocol servers use selected protocol metadata instead of default server row.
-                if (!empty($protoMetadata['container_name']) && is_string($protoMetadata['container_name'])) {
-                    $serverData['container_name'] = trim($protoMetadata['container_name']);
-                }
-                $serverData['install_protocol'] = $slug;
+        // Detect whether the selected protocol is the server's PRIMARY protocol.
+        // syncServerKeysFromContainer() writes keys/port back into the vpn_servers row,
+        // which is only correct for the primary. For a SECONDARY protocol (e.g. awg2 on a
+        // server whose primary is amnezia-wg) those values live in the protocol's own
+        // container / server_protocols, and writing them into vpn_servers would corrupt
+        // the primary server's stored config.
+        $primaryProtocolSlug = (string) ($server->getData()['install_protocol'] ?? '');
+        $isPrimaryProtocol = ($primaryProtocolSlug === '' || $slug === $primaryProtocolSlug);
 
+        // Always target the selected protocol's own container.
+        if ($isWireguard) {
+            if (!empty($protoMetadata['container_name']) && is_string($protoMetadata['container_name'])) {
+                $serverData['container_name'] = trim($protoMetadata['container_name']);
+            }
+            $serverData['install_protocol'] = $slug;
+        }
+
+        // Auto-sync server keys into the vpn_servers row for the PRIMARY WireGuard protocol only.
+        if ($isWireguard && $isPrimaryProtocol) {
+            try {
                 self::syncServerKeysFromContainer($server, $serverData);
                 // Reload server data after sync (VpnServer caches DB row in-memory)
                 $server->refresh();
@@ -153,6 +163,13 @@ class VpnClient
             if (!empty($protoMetadata['vpn_subnet'])) {
                 $serverData['vpn_subnet'] = $protoMetadata['vpn_subnet'];
             }
+        }
+
+        // Authoritative source of truth for WireGuard server params: read them directly from
+        // the SELECTED protocol's own container (handles multi-protocol servers, e.g. awg2
+        // alongside amnezia-wg). Must run for the final config, not just the primary.
+        if ($isWireguard) {
+            $serverData = self::applyProtocolServerData($server, $serverData, $protoRow, $slug);
         }
 
         $clientIP = self::getNextClientIP($serverData);
@@ -1111,6 +1128,76 @@ class VpnClient
     }
 
     /**
+     * Resolve authoritative WireGuard server parameters for a SPECIFIC protocol by reading
+     * them directly from that protocol's own container. This is the source of truth on
+     * multi-protocol servers (e.g. awg2 in its own amnezia-awg2 container running alongside
+     * the primary amnezia-awg): it returns $serverData with container_name / vpn_subnet from
+     * the protocol metadata and server_public_key / preshared_key / vpn_port / awg_params read
+     * from the live container — never the primary server's values from the vpn_servers row.
+     */
+    private static function applyProtocolServerData(VpnServer $server, array $serverData, ?array $protoRow, string $slug): array
+    {
+        $meta = [];
+        if ($protoRow && !empty($protoRow['definition']) && is_string($protoRow['definition'])) {
+            $decoded = json_decode($protoRow['definition'], true);
+            if (is_array($decoded)) {
+                $meta = $decoded['metadata'] ?? [];
+            }
+        }
+        if (!empty($meta['container_name']) && is_string($meta['container_name'])) {
+            $serverData['container_name'] = trim($meta['container_name']);
+        }
+        if (!empty($meta['vpn_subnet']) && is_string($meta['vpn_subnet'])) {
+            $serverData['vpn_subnet'] = $meta['vpn_subnet'];
+        }
+        if ($slug !== '') {
+            $serverData['install_protocol'] = $slug;
+        }
+
+        try {
+            $cont = (string) ($serverData['container_name'] ?? '');
+            if ($cont === '') {
+                return $serverData;
+            }
+            $isAwg2c = (stripos($cont, 'awg2') !== false || $slug === 'awg2');
+            $confName = $isAwg2c ? 'awg0.conf' : 'wg0.conf';
+            $dir = '/opt/amnezia/awg';
+            $contArg = escapeshellarg($cont);
+            $readConf = escapeshellarg("cat {$dir}/{$confName} 2>/dev/null || cat {$dir}/wg0.conf 2>/dev/null || cat {$dir}/awg0.conf 2>/dev/null");
+            $conf = trim((string) $server->executeCommand("docker exec -i {$contArg} sh -c {$readConf}", true));
+            if (strpos($conf, '[Interface]') !== false) {
+                if (preg_match('/^\s*ListenPort\s*=\s*(\d+)/mi', $conf, $mp)) {
+                    $serverData['vpn_port'] = (int) $mp[1];
+                }
+                $params = [];
+                foreach (['Jc', 'Jmin', 'Jmax', 'S1', 'S2', 'S3', 'S4', 'H1', 'H2', 'H3', 'H4', 'I1', 'I2', 'I3', 'I4', 'I5'] as $p) {
+                    if (preg_match('/^\s*' . $p . '\s*=\s*(.*)$/mi', $conf, $mm)) {
+                        $val = trim($mm[1]);
+                        if ($val !== '') {
+                            $params[strtoupper($p)] = ctype_digit($val) ? (int) $val : $val;
+                        }
+                    }
+                }
+                if (!empty($params)) {
+                    $serverData['awg_params'] = json_encode($params);
+                }
+            }
+            $pub = trim((string) $server->executeCommand("docker exec -i {$contArg} cat {$dir}/wireguard_server_public_key.key 2>/dev/null", true));
+            if (strlen($pub) >= 40 && strpos($pub, ' ') === false) {
+                $serverData['server_public_key'] = $pub;
+            }
+            $psk = trim((string) $server->executeCommand("docker exec -i {$contArg} cat {$dir}/wireguard_psk.key 2>/dev/null", true));
+            if (strlen($psk) >= 40 && strpos($psk, ' ') === false) {
+                $serverData['preshared_key'] = $psk;
+            }
+        } catch (Exception $e) {
+            error_log('applyProtocolServerData failed: ' . $e->getMessage());
+        }
+
+        return $serverData;
+    }
+
+    /**
      * Build client configuration file
      */
     public static function buildClientConfig(
@@ -1722,11 +1809,19 @@ class VpnClient
             return ['success' => false, 'error' => 'not_wireguard_protocol', 'protocol_slug' => $slug];
         }
 
-        if ($forceSyncServer) {
+        // Sync container keys into the vpn_servers row only for the PRIMARY protocol — for a
+        // secondary protocol (e.g. awg2) that would overwrite the primary server's stored config.
+        $primaryProtocolSlug = (string) ($server->getData()['install_protocol'] ?? '');
+        $isPrimaryProtocol = ($primaryProtocolSlug === '' || $slug === $primaryProtocolSlug);
+        if ($forceSyncServer && $isPrimaryProtocol) {
             self::syncServerKeysFromContainer($server, $serverData);
             $server->refresh();
             $serverData = $server->getData();
         }
+
+        // Resolve authoritative server params for THIS protocol from its own container
+        // (correct key/PSK/port/AWG params even when it is a secondary protocol).
+        $serverData = self::applyProtocolServerData($server, $serverData, $protoRow, $slug);
 
         $privateKey = (string) ($this->data['private_key'] ?? '');
         $clientPublicKey = (string) ($this->data['public_key'] ?? '');

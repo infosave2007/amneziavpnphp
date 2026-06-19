@@ -1536,6 +1536,16 @@ class InstallProtocolManager
             // ── No existing installation found — proceed with fresh install ──
 
             if ($engine === 'builtin_awg') {
+                // Guard: runAwgInstall() ALWAYS targets the server's PRIMARY container
+                // (vpn_servers.container_name). A secondary AWG-family protocol such as awg2
+                // declares its own container in metadata and ships its own install_script;
+                // routing it through the builtin installer would rebuild and wipe the primary
+                // container (e.g. clobber amnezia-awg or aivpn-server). Fall through to the
+                // scripted install in that case so awg2 builds its own amnezia-awg2 container.
+                $metaContainer = trim((string) ($protocol['definition']['metadata']['container_name'] ?? ''));
+                $primaryContainer = trim((string) ($server->getData()['container_name'] ?? 'amnezia-awg'));
+                $useOwnScript = ($metaContainer !== '' && $metaContainer !== $primaryContainer && !empty($protocol['install_script']));
+                if (!$useOwnScript) {
                 $res = $server->runAwgInstall($options);
                 Logger::appendInstall($serverId, 'Builtin AWG install finished');
 
@@ -1589,6 +1599,8 @@ class InstallProtocolManager
                 // Sync existing clients from DB to Container (Restore active clients)
                 self::syncClientsToContainer($server, $protocol);
                 return ['success' => true, 'mode' => 'install', 'details' => $res];
+                }
+                Logger::appendInstall($serverId, 'Secondary AWG protocol ' . ($slug ?: 'unknown') . ' uses own container ' . $metaContainer . ' — installing via its own script (server primary container left untouched)');
             }
             if (!isset($options['server_port']) || !is_int($options['server_port'])) {
                 $options['server_port'] = self::chooseServerPort($server, $protocol['definition']['metadata'] ?? []);
