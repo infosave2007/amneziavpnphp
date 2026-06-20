@@ -661,13 +661,37 @@ class VpnServer
      */
     private function createDockerfile(): void
     {
+        // Build the awg2 container image from a clean Alpine base.
+        //
+        // The historical base image `amneziavpn/amnezia-wg:latest` only ships
+        // with the stock `wg`/`wg-quick` binaries, which silently ignore the
+        // AmneziaWG obfuscation parameters (Jc/Jmin/Jmax/S1-S4/H1-H4/I1-I5).
+        // As a result, clients using the official AmneziaVPN application
+        // failed to handshake even though `wg show` reported the interface
+        // as up.
+        //
+        // We compile `amneziawg-tools` (which provides `awg` and `awg-quick`)
+        // from source. The kernel module is loaded on the host via the
+        // `amneziawg-dkms` package and shared into the container through the
+        // `-v /lib/modules:/lib/modules` mount that runContainer() already adds.
         $dockerfile = <<<'DOCKERFILE'
-FROM amneziavpn/amnezia-wg:latest
+FROM alpine:3.18
 
 LABEL maintainer="AmneziaVPN"
 
-RUN apk add --no-cache bash curl dumb-init
-RUN apk --update upgrade --no-cache
+RUN apk add --no-cache bash curl dumb-init iptables ip6tables iproute2 openresolv build-base linux-headers git
+
+# Build amneziawg-tools from source (provides awg and awg-quick)
+RUN git clone https://github.com/amnezia-vpn/amneziawg-tools.git /tmp/awg-tools \
+    && cd /tmp/awg-tools/src \
+    && make WITH_BASHCOMPLETION=no WITH_SYSTEMDUNITS=no \
+    && make WITH_BASHCOMPLETION=no WITH_SYSTEMDUNITS=no install \
+    && rm -rf /tmp/awg-tools
+
+# Also install wireguard-tools so that the stock `wg` binary remains available
+# (the panel uses `wg genkey`/`wg pubkey`/`wg genpsk` for initial key material;
+# they are wire-compatible with awg).
+RUN apk add --no-cache wireguard-tools
 
 RUN mkdir -p /opt/amnezia
 RUN echo -e "#!/bin/bash\ntail -f /dev/null" > /opt/amnezia/start.sh
@@ -700,14 +724,14 @@ for i in {1..30}; do
 done
 
 # Kill daemons in case of restart
-wg-quick down /opt/amnezia/awg/wg0.conf 2>/dev/null || true
+awg-quick down /opt/amnezia/awg/wg0.conf 2>/dev/null || true
 
 # Start daemons if configured
 if [ -f /opt/amnezia/awg/wg0.conf ]; then
-    wg-quick up /opt/amnezia/awg/wg0.conf
-    echo "WireGuard started"
+    awg-quick up /opt/amnezia/awg/wg0.conf
+    echo "AmneziaWG started"
 else
-    echo "No wg0.conf found, skipping WireGuard startup"
+    echo "No wg0.conf found, skipping AmneziaWG startup"
 fi
 
 # Allow traffic on the TUN interface
@@ -791,23 +815,50 @@ BASH;
         $pubKey = trim($this->executeCommand("docker exec -i {$containerName} cat /opt/amnezia/awg/wireguard_server_public_key.key", true));
         $psk = trim($this->executeCommand("docker exec -i {$containerName} cat /opt/amnezia/awg/wireguard_psk.key", true));
 
-        // Generate AWG parameters
+        // Generate full AWG2 obfuscation parameters.
+        //
+        // Previously only Jc/Jmin/Jmax/S1/S2/H1-H4 were generated for the
+        // server, but the panel's client config builder (VpnClient.php) emits
+        // S3/S4 and an I1 magic-packet template using fallback defaults.
+        // The mismatch broke handshake with the official AmneziaVPN client,
+        // which transmits S3/S4 bytes of junk after each handshake message.
+        // The kernel module silently dropped those packets because the server
+        // side had S3=0/S4=0.
+        //
+        // We now generate a full, self-consistent parameter set on the server
+        // and persist it so subsequent client builds re-use the same values.
         $awgParams = [
             'Jc' => 3,
             'Jmin' => 10,
             'Jmax' => 50,
             'S1' => rand(50, 250),
             'S2' => rand(50, 250),
+            'S3' => rand(5, 25),
+            'S4' => rand(5, 25),
             'H1' => rand(100000, 2000000000),
             'H2' => rand(100000, 2000000000),
             'H3' => rand(100000, 2000000000),
-            'H4' => rand(100000, 2000000000)
+            'H4' => rand(100000, 2000000000),
+            // I1 mimics a small DNS response targeting an Apple/iCloud-looking
+            // hostname so the first obfuscated packet looks like benign
+            // DNS-over-UDP traffic to passive observers.
+            'I1' => '<r 2><b 0x858000010001000000000669636c6f756403636f6d0000010001c00c000100010000105a00044d583737>',
         ];
 
-        // Create wg0.conf
+        // Build the server's wg0.conf.
+        //
+        // Note: $this->data['vpn_subnet'] is a CIDR like "10.8.1.0/24". Using
+        // it verbatim sets the server's interface address to the network
+        // address (".0") which works in practice but is semantically wrong.
+        // We rewrite the host bits to .1 to use a conventional gateway IP.
+        $serverAddr = $this->data['vpn_subnet'];
+        if (preg_match('#^(\d+\.\d+\.\d+)\.\d+(/\d+)$#', $serverAddr, $m)) {
+            $serverAddr = $m[1] . '.1' . $m[2];
+        }
+
         $wgConfig = "[Interface]\n";
         $wgConfig .= "PrivateKey = {$privKey}\n";
-        $wgConfig .= "Address = {$this->data['vpn_subnet']}\n";
+        $wgConfig .= "Address = {$serverAddr}\n";
         $wgConfig .= "ListenPort = {$vpnPort}\n";
         foreach ($awgParams as $key => $value) {
             $wgConfig .= "{$key} = {$value}\n";
@@ -821,8 +872,8 @@ BASH;
         // Create clientsTable
         $this->executeCommand("docker exec -i {$containerName} sh -c 'echo \"[]\" > /opt/amnezia/awg/clientsTable'", true);
 
-        // Start WireGuard
-        $this->executeCommand("docker exec -i {$containerName} wg-quick up /opt/amnezia/awg/wg0.conf 2>&1", true);
+        // Start AmneziaWG (real `awg-quick`, not stock `wg-quick`)
+        $this->executeCommand("docker exec -i {$containerName} awg-quick up /opt/amnezia/awg/wg0.conf 2>&1", true);
 
         // Apply firewall rules
         $this->executeCommand("docker exec -i {$containerName} sh -c 'iptables -A INPUT -i wg0 -j ACCEPT 2>/dev/null || true'", true);
