@@ -1,13 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PANEL_URL="http://localhost:8082"
-EMAIL="admin@amnez.ia"
-PASSWORD="admin123"
-SERVER_ID="1"
-REMOTE_HOST="__REDACTED_HOST__"
-REMOTE_USER="root"
-REMOTE_PASS='__REDACTED_CREDENTIAL__'
+# Configuration via environment variables. Required (no defaults, script aborts if unset):
+#   PANEL_PASSWORD  panel admin password
+#   REMOTE_HOST     target server host/IP
+#   REMOTE_PASS     target server SSH password
+# Example:
+#   REMOTE_HOST=1.2.3.4 REMOTE_PASS=... PANEL_PASSWORD=... ./remote_reset_and_reinstall_all_protocols.sh
+PANEL_URL="${PANEL_URL:-http://localhost:8082}"
+EMAIL="${PANEL_EMAIL:-admin@amnez.ia}"
+PASSWORD="${PANEL_PASSWORD:?set PANEL_PASSWORD}"
+SERVER_ID="${SERVER_ID:-1}"
+REMOTE_HOST="${REMOTE_HOST:?set REMOTE_HOST}"
+REMOTE_USER="${REMOTE_USER:-root}"
+REMOTE_PASS="${REMOTE_PASS:?set REMOTE_PASS}"
 
 # protocol IDs in this workspace
 AWG2_ID="11"

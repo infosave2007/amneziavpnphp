@@ -4,7 +4,7 @@ set -euo pipefail
 PANEL_URL="${PANEL_URL:-http://localhost:8082}"
 EMAIL="${EMAIL:-admin@amnez.ia}"
 PASSWORD="${PASSWORD:-admin123}"
-SERVER_HOST="${SERVER_HOST:-__REDACTED_HOST__}"
+SERVER_HOST="${SERVER_HOST:?set SERVER_HOST (panel server host/IP)}"
 PROTOCOL_SLUG="${PROTOCOL_SLUG:-amnezia-wg-advanced}"
 CLIENT_NAME="${CLIENT_NAME:-api-selfcheck}"
 CLIENT_LOGIN="${CLIENT_LOGIN:-api-selfcheck}"
