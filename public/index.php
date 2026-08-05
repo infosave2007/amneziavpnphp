@@ -19,6 +19,7 @@ require_once __DIR__ . '/../inc/Config.php';
 require_once __DIR__ . '/../inc/DB.php';
 require_once __DIR__ . '/../inc/Auth.php';
 require_once __DIR__ . '/../inc/Router.php';
+require_once __DIR__ . '/../inc/Version.php';
 require_once __DIR__ . '/../inc/View.php';
 require_once __DIR__ . '/../inc/VpnServer.php';
 require_once __DIR__ . '/../inc/VpnClient.php';
@@ -90,6 +91,10 @@ View::init(__DIR__ . '/../templates', [
     'current_language' => Translator::getCurrentLanguage(),
     'languages' => Translator::getSupportedLanguages(),
     'current_uri' => $_SERVER['REQUEST_URI'] ?? '/dashboard',
+    'app_version' => Version::current(),
+    'latest_version' => Version::latest(),
+    'update_available' => Version::updateAvailable(),
+    'repo_releases_url' => 'https://github.com/infosave2007/amneziavpnphp/releases',
     't' => function ($key, $params = []) {
         return Translator::t($key, $params);
     }
