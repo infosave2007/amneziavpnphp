@@ -1,4 +1,5 @@
 <?php
+require_once __DIR__ . '/Ssh.php';
 
 /**
  * ServerMonitoring - Collect and store server metrics
@@ -33,7 +34,7 @@ class ServerMonitoring
         // Even if server's container_name is different, there may be xray clients
         $xrayContainer = $this->getXrayContainerName() ?? 'amnezia-xray';
         
-        $cmd = "docker exec $xrayContainer xray api statsquery --pattern 'user>>>' --reset=true --server=127.0.0.1:10085 2>/dev/null";
+        $cmd = 'docker exec ' . Ssh::remoteArg($xrayContainer) . " xray api statsquery --pattern 'user>>>' --reset=true --server=127.0.0.1:10085 2>/dev/null";
         $json = $this->execSSH($cmd);
 
         if (!$json || trim($json) === '') {
@@ -625,11 +626,16 @@ class ServerMonitoring
      */
     private function execSSH(string $cmd): ?string
     {
-        $host = $this->serverData['host'];
-        $port = (int)$this->serverData['port'];
-        $username = $this->serverData['username'];
         $sshKey = $this->serverData['ssh_key'] ?? '';
         $password = $this->serverData['password'] ?? '';
+
+        try {
+            $target = Ssh::target((string) $this->serverData['username'], (string) $this->serverData['host']);
+            $port = Ssh::port($this->serverData['port']);
+        } catch (InvalidArgumentException $e) {
+            error_log('ServerMonitoring: skipping server with invalid SSH target: ' . $e->getMessage());
+            return null;
+        }
 
         $sshOptions = '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o LogLevel=ERROR';
         $keyFile = '';
@@ -647,23 +653,21 @@ class ServerMonitoring
             chmod($keyFile, 0600);
             $sshOptions .= " -i {$keyFile} -o IdentitiesOnly=yes -o PubkeyAuthentication=yes -o PreferredAuthentications=publickey";
             $sshCmd = sprintf(
-                "ssh -p %d %s %s@%s %s 2>/dev/null",
+                "ssh -p %d %s %s %s 2>/dev/null",
                 $port,
                 $sshOptions,
-                $username,
-                $host,
+                $target,
                 escapeshellarg($cmd)
             );
         } else {
             // Password authentication
             $sshOptions .= " -o PreferredAuthentications=password -o PubkeyAuthentication=no";
             $sshCmd = sprintf(
-                "sshpass -p %s ssh -p %d %s %s@%s %s 2>/dev/null",
+                "sshpass -p %s ssh -p %d %s %s %s 2>/dev/null",
                 escapeshellarg($password),
                 $port,
                 $sshOptions,
-                $username,
-                $host,
+                $target,
                 escapeshellarg($cmd)
             );
         }
@@ -886,7 +890,7 @@ class ServerMonitoring
         }
 
         // Get all online users
-        $cmd = "docker exec $xrayContainer xray api statsgetallonlineusers --server=127.0.0.1:10085";
+        $cmd = 'docker exec ' . Ssh::remoteArg($xrayContainer) . ' xray api statsgetallonlineusers --server=127.0.0.1:10085';
         $result = $this->execSSH($cmd);
         if (!$result) {
             return;
@@ -914,7 +918,7 @@ class ServerMonitoring
             }
 
             // Get IP list for this user
-            $ipCmd = "docker exec $xrayContainer xray api statsonlineiplist --server=127.0.0.1:10085 --email=" . escapeshellarg($email);
+            $ipCmd = 'docker exec ' . Ssh::remoteArg($xrayContainer) . ' xray api statsonlineiplist --server=127.0.0.1:10085 --email=' . Ssh::remoteArg($email);
             $ipResult = $this->execSSH($ipCmd);
             if (!$ipResult) {
                 continue;
@@ -943,13 +947,15 @@ class ServerMonitoring
         // Update blocking rules
         if (!empty($ipsToBlock)) {
             // Block collected IPs (with -reset to replace existing rule)
-            $ipList = implode(' ', array_unique($ipsToBlock));
-            $blockCmd = "docker exec $xrayContainer xray api sib --server=127.0.0.1:10085 -outbound=blocked -inbound=vless-in -reset $ipList";
+            $uniqueIps = array_unique($ipsToBlock);
+            $ipList = implode(' ', array_map([Ssh::class, 'remoteArg'], $uniqueIps));
+            $blockCmd = 'docker exec ' . Ssh::remoteArg($xrayContainer)
+                . " xray api sib --server=127.0.0.1:10085 -outbound=blocked -inbound=vless-in -reset $ipList";
             $this->execSSH($blockCmd);
             error_log("[Xray Enforcement] Blocked IPs: $ipList");
         } else {
             // No IPs to block - remove the blocking rule if it exists
-            $rmCmd = "docker exec $xrayContainer xray api rmrules --server=127.0.0.1:10085 sourceIpBlock 2>/dev/null || true";
+            $rmCmd = 'docker exec ' . Ssh::remoteArg($xrayContainer) . ' xray api rmrules --server=127.0.0.1:10085 sourceIpBlock 2>/dev/null || true';
             $this->execSSH($rmCmd);
         }
     }
@@ -1108,25 +1114,29 @@ class ServerMonitoring
             }
             
             // Build SSH command
-            $host = $serverData['host'];
-            $port = (int)($serverData['port'] ?? 22);
-            $username = $serverData['username'] ?? 'root';
             $password = $serverData['password'] ?? '';
-            
+
+            try {
+                $target = Ssh::target((string) ($serverData['username'] ?? 'root'), (string) $serverData['host']);
+                $port = Ssh::port($serverData['port'] ?? 22);
+            } catch (InvalidArgumentException $e) {
+                error_log('ServerMonitoring: skipping server with invalid SSH target: ' . $e->getMessage());
+                continue;
+            }
+
             $xrayContainer = $isXrayServer ? $containerName : 'amnezia-xray';
-            $cmd = "docker exec $xrayContainer xray api statsgetallonlineusers --server=127.0.0.1:10085";
-            
+            $cmd = 'docker exec ' . Ssh::remoteArg($xrayContainer) . ' xray api statsgetallonlineusers --server=127.0.0.1:10085';
+
             $sshOptions = '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5';
             $sshCmd = sprintf(
-                "sshpass -p %s ssh -p %d %s %s@%s %s 2>/dev/null",
+                "sshpass -p %s ssh -p %d %s %s %s 2>/dev/null",
                 escapeshellarg($password),
                 $port,
                 $sshOptions,
-                $username,
-                $host,
+                $target,
                 escapeshellarg($cmd)
             );
-            
+
             $output = shell_exec($sshCmd);
             if (!$output) {
                 continue;
@@ -1189,26 +1199,35 @@ class ServerMonitoring
         $containerName = $serverData['container_name'] ?? '';
         $isXrayServer = strpos($containerName, 'xray') !== false;
         
+        $target = null;
+        $port = 22;
         if ($hasXrayClients || $isXrayServer) {
-            $host = $serverData['host'];
-            $port = (int)($serverData['port'] ?? 22);
-            $username = $serverData['username'] ?? 'root';
+            try {
+                $target = Ssh::target((string) ($serverData['username'] ?? 'root'), (string) $serverData['host']);
+                $port = Ssh::port($serverData['port'] ?? 22);
+            } catch (InvalidArgumentException $e) {
+                error_log('ServerMonitoring: skipping Xray online check, invalid SSH target: ' . $e->getMessage());
+            }
+        }
+
+        // Xray reports its own online users over the API; skipped when the
+        // stored SSH target is unusable.
+        if ($target !== null) {
             $password = $serverData['password'] ?? '';
-            
+
             $xrayContainer = $isXrayServer ? $containerName : 'amnezia-xray';
-            $cmd = "docker exec $xrayContainer xray api statsgetallonlineusers --server=127.0.0.1:10085";
-            
+            $cmd = 'docker exec ' . Ssh::remoteArg($xrayContainer) . ' xray api statsgetallonlineusers --server=127.0.0.1:10085';
+
             $sshOptions = '-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5';
             $sshCmd = sprintf(
-                "sshpass -p %s ssh -p %d %s %s@%s %s 2>/dev/null",
+                "sshpass -p %s ssh -p %d %s %s %s 2>/dev/null",
                 escapeshellarg($password),
                 $port,
                 $sshOptions,
-                $username,
-                $host,
+                $target,
                 escapeshellarg($cmd)
             );
-            
+
             $output = shell_exec($sshCmd);
             if ($output) {
                 $data = json_decode($output, true);

@@ -1,5 +1,6 @@
 <?php
 require_once __DIR__ . '/Logger.php';
+require_once __DIR__ . '/Ssh.php';
 
 class InstallProtocolManager
 {
@@ -742,8 +743,12 @@ class InstallProtocolManager
             }
             
             // Write updated config back to container
-            $escapedConfig = addslashes($updatedConfig);
-            $server->executeCommand("docker exec -i {$containerArg} sh -c 'echo \"$escapedConfig\" > {$configDir}/{$configFile}'", true);
+            $server->executeCommand(
+                'echo ' . Ssh::remoteArg(base64_encode($updatedConfig))
+                . " | base64 -d | docker exec -i {$containerArg} tee "
+                . Ssh::remoteArg($configDir . '/' . $configFile) . ' > /dev/null',
+                true
+            );
             
             // Update clientsTable with new public keys
             $updatedTable = $clientsTable;
@@ -757,8 +762,15 @@ class InstallProtocolManager
                     }
                 }
             }
-            $tableJson = addslashes(json_encode($updatedTable, JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT));
-            $server->executeCommand("docker exec -i {$containerArg} sh -c 'echo \"$tableJson\" > {$configDir}/clientsTable'", true);
+            // json_encode does not escape $ or backticks, so the table (which
+            // carries free-text client names) is transferred base64-encoded.
+            $tableJson = json_encode($updatedTable, JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+            $server->executeCommand(
+                'echo ' . Ssh::remoteArg(base64_encode($tableJson))
+                . " | base64 -d | docker exec -i {$containerArg} tee "
+                . Ssh::remoteArg($configDir . '/clientsTable') . ' > /dev/null',
+                true
+            );
             
             // Restart WireGuard interface to apply changes
             $server->executeCommand("docker exec -i {$containerArg} wg-quick down {$configDir}/{$configFile} 2>/dev/null || true", true);
@@ -2282,8 +2294,12 @@ class InstallProtocolManager
         if ($count > 0) {
             Logger::appendInstall($serverId, "Syncing $count existing clients to server config");
             $conf .= $newPeersBlock;
-            $escaped = addslashes($conf);
-            $server->executeCommand("docker exec -i $containerName sh -c 'echo \"$escaped\" > {$configDir}/{$configFile}'", true);
+            $server->executeCommand(
+                'echo ' . Ssh::remoteArg(base64_encode($conf))
+                . ' | base64 -d | docker exec -i ' . Ssh::remoteArg($containerName)
+                . ' tee ' . Ssh::remoteArg($configDir . '/' . $configFile) . ' > /dev/null',
+                true
+            );
 
             // Reload interface
             $server->executeCommand("docker exec -i $containerName wg-quick down wg0 || true", true);
