@@ -1,4 +1,6 @@
 <?php
+require_once __DIR__ . '/Ssh.php';
+
 /**
  * VPN Client Management Class
  * Handles creation and management of VPN client configurations
@@ -730,6 +732,18 @@ class VpnClient
             throw new Exception('Client backup data is incomplete');
         }
 
+        // Keys from a backup file end up in wg0.conf on the server, so they are
+        // held to the WireGuard key format rather than merely being non-empty.
+        foreach (['public_key' => $publicKey, 'private_key' => $privateKey] as $field => $key) {
+            if (!preg_match('#^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=$#', $key)) {
+                throw new Exception("Client backup data has an invalid {$field}");
+            }
+        }
+
+        if (filter_var($clientIp, FILTER_VALIDATE_IP) === false) {
+            throw new Exception('Client backup data has an invalid client_ip');
+        }
+
         // Skip if client with same IP already exists
         $stmt = $pdo->prepare('SELECT id FROM vpn_clients WHERE server_id = ? AND client_ip = ? LIMIT 1');
         $stmt->execute([$serverData['id'], $clientIp]);
@@ -742,7 +756,11 @@ class VpnClient
             $name = $clientIp;
         }
 
-        $presharedKey = $clientData['preshared_key'] ?? ($serverData['preshared_key'] ?? '');
+        $presharedKey = trim((string) ($clientData['preshared_key'] ?? ($serverData['preshared_key'] ?? '')));
+        if ($presharedKey !== '' && !preg_match('#^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=$#', $presharedKey)) {
+            throw new Exception('Client backup data has an invalid preshared_key');
+        }
+
         $config = $clientData['config'] ?? '';
 
         if ($config === '' && !empty($serverData['server_public_key']) && !empty($serverData['host']) && !empty($serverData['vpn_port'])) {
@@ -827,11 +845,10 @@ class VpnClient
 
         $escaped = escapeshellarg($cmd);
         $sshCmd = sprintf(
-            "sshpass -p %s ssh -p %d -q -o LogLevel=ERROR -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o PreferredAuthentications=password -o PubkeyAuthentication=no %s@%s %s 2>&1",
+            "sshpass -p %s ssh -p %d -q -o LogLevel=ERROR -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o PreferredAuthentications=password -o PubkeyAuthentication=no %s %s 2>&1",
             escapeshellarg($serverData['password']),
-            $serverData['port'],
-            $serverData['username'],
-            $serverData['host'],
+            Ssh::port($serverData['port']),
+            Ssh::target((string) $serverData['username'], (string) $serverData['host']),
             $escaped
         );
 
@@ -1331,8 +1348,9 @@ class VpnClient
         $peerBlock .= "PresharedKey = {$presharedKey}\n";
         $peerBlock .= "AllowedIPs = {$clientIP}/32\n";
 
-        $escapedBlock = addslashes($peerBlock);
-        $cmd4 = sprintf("docker exec -i %s sh -c 'echo \"%s\" >> %s/%s'", $containerName, $escapedBlock, $configDir, $configFile);
+        $cmd4 = 'echo ' . Ssh::remoteArg(base64_encode($peerBlock))
+            . ' | base64 -d | docker exec -i ' . Ssh::remoteArg($containerName)
+            . ' tee -a ' . Ssh::remoteArg($configDir . '/' . $configFile) . ' > /dev/null';
         self::executeServerCommand($serverData, $cmd4, true);
 
         // 5. Update clientsTable
@@ -1355,7 +1373,8 @@ class VpnClient
         $configDir = '/opt/amnezia/awg'; // Внутри контейнера всегда /opt/amnezia/awg
 
         // Read current table
-        $cmd = sprintf("docker exec -i %s cat %s/clientsTable 2>/dev/null", $containerName, $configDir);
+        $cmd = 'docker exec -i ' . Ssh::remoteArg($containerName)
+            . ' cat ' . Ssh::remoteArg($configDir . '/clientsTable') . ' 2>/dev/null';
         $tableJson = self::executeServerCommand($serverData, $cmd, true);
         $table = json_decode(trim($tableJson), true);
 
@@ -1374,8 +1393,12 @@ class VpnClient
 
         // Save back
         $newTableJson = json_encode($table, JSON_PRETTY_PRINT);
-        $escaped = addslashes($newTableJson);
-        $updateCmd = sprintf("docker exec -i %s sh -c 'echo \"%s\" > %s/clientsTable'", $containerName, $escaped, $configDir);
+        // Transferred base64-encoded: the table embeds the client-supplied name,
+        // which must never be parsed by the container's shell. Decoded on the
+        // host and piped in, so the container only needs tee.
+        $updateCmd = 'echo ' . Ssh::remoteArg(base64_encode($newTableJson))
+            . ' | base64 -d | docker exec -i ' . Ssh::remoteArg($containerName)
+            . ' tee ' . Ssh::remoteArg($configDir . '/clientsTable') . ' > /dev/null';
         self::executeServerCommand($serverData, $updateCmd, true);
     }
 
@@ -1389,17 +1412,19 @@ class VpnClient
 
         if ($needsSudo) {
             // Suppress sudo prompt noise in stdout to keep parser output stable.
-            $command = "echo '{$serverData['password']}' | sudo -S -p '' " . $command;
+            $command = Ssh::sudo($command, (string) ($serverData['password'] ?? ''));
         }
 
-        $run = static function (string $cmd) use ($serverData): string {
+        $target = Ssh::target((string) $serverData['username'], (string) $serverData['host']);
+        $port = Ssh::port($serverData['port']);
+
+        $run = static function (string $cmd) use ($serverData, $target, $port): string {
             $escapedCommand = escapeshellarg($cmd);
             $sshCommand = sprintf(
-                "sshpass -p %s ssh  -p %d -q -o LogLevel=ERROR -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o PreferredAuthentications=password -o PubkeyAuthentication=no %s@%s %s 2>&1",
+                "sshpass -p %s ssh  -p %d -q -o LogLevel=ERROR -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o PreferredAuthentications=password -o PubkeyAuthentication=no %s %s 2>&1",
                 escapeshellarg($serverData['password']),
-                $serverData['port'],
-                $serverData['username'],
-                $serverData['host'],
+                $port,
+                $target,
                 $escapedCommand
             );
 
@@ -1737,7 +1762,8 @@ class VpnClient
         $configDir = '/opt/amnezia/awg'; // Внутри контейнера всегда /opt/amnezia/awg
 
         // Read current table
-        $cmd = sprintf("docker exec -i %s cat %s/clientsTable 2>/dev/null", $containerName, $configDir);
+        $cmd = 'docker exec -i ' . Ssh::remoteArg($containerName)
+            . ' cat ' . Ssh::remoteArg($configDir . '/clientsTable') . ' 2>/dev/null';
         $tableJson = self::executeServerCommand($serverData, $cmd, true);
         $table = json_decode(trim($tableJson), true);
 
@@ -1755,8 +1781,12 @@ class VpnClient
 
         // Save back
         $newTableJson = json_encode($table, JSON_PRETTY_PRINT);
-        $escaped = addslashes($newTableJson);
-        $updateCmd = sprintf("docker exec -i %s sh -c 'echo \"%s\" > %s/clientsTable'", $containerName, $escaped, $configDir);
+        // Transferred base64-encoded: the table embeds the client-supplied name,
+        // which must never be parsed by the container's shell. Decoded on the
+        // host and piped in, so the container only needs tee.
+        $updateCmd = 'echo ' . Ssh::remoteArg(base64_encode($newTableJson))
+            . ' | base64 -d | docker exec -i ' . Ssh::remoteArg($containerName)
+            . ' tee ' . Ssh::remoteArg($configDir . '/clientsTable') . ' > /dev/null';
         self::executeServerCommand($serverData, $updateCmd, true);
     }
 

@@ -127,6 +127,17 @@ function debugRoutesEnabled(): bool
     return in_array($val, ['1', 'true', 'yes', 'on'], true);
 }
 
+/**
+ * Self-registration is off unless explicitly enabled: this panel stores SSH
+ * credentials for the servers it manages, so an account is not a low-privilege
+ * object. Set ALLOW_REGISTRATION=true to re-open it.
+ */
+function registrationEnabled(): bool
+{
+    $val = strtolower((string) (Config::get('ALLOW_REGISTRATION', '') ?: ''));
+    return in_array($val, ['1', 'true', 'yes', 'on'], true);
+}
+
 function requireDebugEnabledOrAdmin(): void
 {
     requireAuth();
@@ -213,10 +224,19 @@ Router::get('/register', function () {
     if (Auth::check()) {
         redirect('/dashboard');
     }
+    if (!registrationEnabled()) {
+        redirect('/login');
+    }
     View::render('register.twig');
 });
 
 Router::post('/register', function () {
+    if (!registrationEnabled()) {
+        http_response_code(403);
+        echo 'Registration is disabled';
+        return;
+    }
+
     $name = trim($_POST['name'] ?? '');
     $email = trim($_POST['email'] ?? '');
     $password = $_POST['password'] ?? '';

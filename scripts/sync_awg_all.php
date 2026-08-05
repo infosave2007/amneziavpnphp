@@ -119,14 +119,17 @@ try {
     // Use host path that matches container volume (-v /opt/amnezia/awg:/opt/amnezia/awg)
     $hostConfPath = '/opt/amnezia/awg/wg0.conf';
 
-    $escaped = addslashes($conf);
-    $server->executeCommand("echo \"$escaped\" > $hostConfPath", true);
+    $server->executeCommand(
+        'echo ' . Ssh::remoteArg(base64_encode($conf)) . ' | base64 -d > ' . Ssh::remoteArg($hostConfPath),
+        true
+    );
     // Also copy to container path if mounted (usually same file via bind mount)
 
     // 6. Restart Interface
     echo "Restarting WireGuard interface...\n";
-    $server->executeCommand("docker exec -i $containerName wg-quick down wg0 || true", true);
-    $server->executeCommand("docker exec -i $containerName wg-quick up wg0", true);
+    $containerArg = Ssh::remoteArg($containerName);
+    $server->executeCommand("docker exec -i {$containerArg} wg-quick down wg0 || true", true);
+    $server->executeCommand("docker exec -i {$containerArg} wg-quick up wg0", true);
 
     echo "Sync Complete.\n";
 

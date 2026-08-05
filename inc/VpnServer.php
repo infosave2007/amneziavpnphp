@@ -1,4 +1,6 @@
 <?php
+require_once __DIR__ . '/Ssh.php';
+
 /**
  * VPN Server Management Class
  * Handles deployment and management of Amnezia VPN servers
@@ -75,6 +77,52 @@ class VpnServer
     }
 
     /**
+     * Docker container names are limited to [A-Za-z0-9][A-Za-z0-9_.-]* by
+     * Docker itself; enforcing it here keeps the value safe to embed in the
+     * remote shell commands that reference the container.
+     */
+    private static function sanitizeContainerName($name): string
+    {
+        $name = trim((string) ($name ?? ''));
+
+        if ($name === '') {
+            return 'amnezia-awg';
+        }
+
+        if (!preg_match('/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/', $name)) {
+            throw new Exception('Invalid container name');
+        }
+
+        return $name;
+    }
+
+    /**
+     * The subnet is written into wg0.conf on the server, so it must not be able
+     * to carry shell syntax.
+     */
+    private static function sanitizeSubnet($subnet): string
+    {
+        $subnet = trim((string) ($subnet ?? ''));
+
+        if ($subnet === '') {
+            return '10.8.1.0/24';
+        }
+
+        if (!preg_match('#^([0-9.]+|[0-9A-Fa-f:]+)/([0-9]{1,3})$#', $subnet, $m)) {
+            throw new Exception('Invalid VPN subnet: expected CIDR notation');
+        }
+
+        $prefix = (int) $m[2];
+        $isV6 = strpos($m[1], ':') !== false;
+
+        if (filter_var($m[1], FILTER_VALIDATE_IP) === false || $prefix > ($isV6 ? 128 : 32)) {
+            throw new Exception('Invalid VPN subnet: expected CIDR notation');
+        }
+
+        return $subnet;
+    }
+
+    /**
      * Create new VPN server in database
      */
     public static function create(array $data): int
@@ -92,6 +140,14 @@ class VpnServer
         if (empty($data['password']) && empty($data['ssh_key'])) {
             throw new Exception("Either password or SSH key is required");
         }
+
+        // Reject shell metacharacters before they are stored: these values are
+        // later used to build ssh command lines.
+        $data['host'] = Ssh::host((string) $data['host']);
+        $data['username'] = Ssh::user((string) $data['username']);
+        $data['port'] = Ssh::port($data['port']);
+        $data['container_name'] = self::sanitizeContainerName($data['container_name'] ?? null);
+        $data['vpn_subnet'] = self::sanitizeSubnet($data['vpn_subnet'] ?? null);
 
         $protocolSlug = trim((string) ($data['install_protocol'] ?? ''));
         if ($protocolSlug === '') {
@@ -119,10 +175,10 @@ class VpnServer
             $data['username'],
             $data['password'] ?? null,
             !empty($data['ssh_key']) ? self::normalizeSshKey($data['ssh_key']) : null,
-            $data['container_name'] ?? 'amnezia-awg',
+            $data['container_name'],
             $protocolSlug,
             $installOptions,
-            $data['vpn_subnet'] ?? '10.8.1.0/24',
+            $data['vpn_subnet'],
             'deploying'
         ]);
 
@@ -142,14 +198,17 @@ class VpnServer
             throw new Exception('Backup is missing server name or host');
         }
 
-        $port = isset($serverData['ssh_port']) ? (int) $serverData['ssh_port'] : 22;
-        $username = trim($serverData['ssh_username'] ?? 'root') ?: 'root';
+        // A backup file is attacker-supplied input, so it gets the same
+        // validation as a manually created server.
+        $host = Ssh::host($host);
+        $port = Ssh::port($serverData['ssh_port'] ?? 22);
+        $username = Ssh::user(trim($serverData['ssh_username'] ?? 'root') ?: 'root');
         $password = (string) ($serverData['ssh_password'] ?? '');
-        $containerName = $serverData['container_name'] ?? 'amnezia-awg';
+        $containerName = self::sanitizeContainerName($serverData['container_name'] ?? null);
         $vpnPort = isset($serverData['vpn_port']) && $serverData['vpn_port'] !== null
             ? (int) $serverData['vpn_port']
             : null;
-        $vpnSubnet = $serverData['vpn_subnet'] ?? '10.8.1.0/24';
+        $vpnSubnet = self::sanitizeSubnet($serverData['vpn_subnet'] ?? null);
         $serverPublicKey = $serverData['server_public_key'] ?? null;
         $presharedKey = $serverData['preshared_key'] ?? null;
 
@@ -416,30 +475,29 @@ class VpnServer
         $credentials = '';
         $keyFile = '';
 
+        $target = Ssh::target((string) $this->data['username'], (string) $this->data['host']);
+        $port = Ssh::port($this->data['port']);
+
         if (!empty($this->data['ssh_key'])) {
             $keyFile = tempnam(sys_get_temp_dir(), 'sshkey');
             file_put_contents($keyFile, self::normalizeSshKey($this->data['ssh_key']));
             chmod($keyFile, 0600);
             $sshOptions .= " -i {$keyFile} -o IdentitiesOnly=yes -o PubkeyAuthentication=yes -o PreferredAuthentications=publickey";
             // sshpass is not needed for key-based auth
-            $baseCmd = "ssh -p %d %s %s@%s";
-
             $testCommand = sprintf(
-                "ssh -p %d %s %s@%s 'echo test' 2>/dev/null",
-                $this->data['port'],
+                "ssh -p %d %s %s 'echo test' 2>/dev/null",
+                $port,
                 $sshOptions,
-                $this->data['username'],
-                $this->data['host']
+                $target
             );
         } else {
             $sshOptions .= " -o PreferredAuthentications=password -o PubkeyAuthentication=no";
             $testCommand = sprintf(
-                "sshpass -p %s ssh -p %d %s %s@%s 'echo test' 2>/dev/null",
+                "sshpass -p %s ssh -p %d %s %s 'echo test' 2>/dev/null",
                 escapeshellarg($this->data['password']),
-                $this->data['port'],
+                $port,
                 $sshOptions,
-                $this->data['username'],
-                $this->data['host']
+                $target
             );
         }
 
@@ -477,6 +535,9 @@ class VpnServer
         $sshOptions = '-o LogLevel=ERROR -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no';
         $keyFile = '';
 
+        $target = Ssh::target((string) $this->data['username'], (string) $this->data['host']);
+        $port = Ssh::port($this->data['port']);
+
         if (!empty($this->data['ssh_key'])) {
             $keyFile = tempnam(sys_get_temp_dir(), 'sshkey');
             file_put_contents($keyFile, self::normalizeSshKey($this->data['ssh_key']));
@@ -487,18 +548,17 @@ class VpnServer
             $escapedCommand = escapeshellarg($preparedCommand);
 
             $sshCommand = sprintf(
-                "ssh -p %d %s %s@%s %s 2>&1",
-                $this->data['port'],
+                "ssh -p %d %s %s %s 2>&1",
+                $port,
                 $sshOptions,
-                $this->data['username'],
-                $this->data['host'],
+                $target,
                 $escapedCommand
             );
         } else {
             $needsSudo = ($sudo ?? false) && strtolower((string) ($this->data['username'] ?? '')) !== 'root';
             if ($needsSudo) {
                 // Suppress sudo prompt text to keep command output machine-parseable.
-                $command = "echo '{$this->data['password']}' | sudo -S -p '' " . $command;
+                $command = Ssh::sudo($command, (string) $this->data['password']);
             }
 
             $preparedCommand = $pathPrefix . $command;
@@ -506,12 +566,11 @@ class VpnServer
 
             $sshOptions .= " -o PreferredAuthentications=password -o PubkeyAuthentication=no";
             $sshCommand = sprintf(
-                "sshpass -p %s ssh -p %d %s %s@%s %s 2>&1",
+                "sshpass -p %s ssh -p %d %s %s %s 2>&1",
                 escapeshellarg($this->data['password']),
-                $this->data['port'],
+                $port,
                 $sshOptions,
-                $this->data['username'],
-                $this->data['host'],
+                $target,
                 $escapedCommand
             );
         }
@@ -532,12 +591,11 @@ class VpnServer
             
             $escapedBaseCommand = escapeshellarg($pathPrefix . $baseCommand);
             $sshCommandNoSudo = sprintf(
-                "sshpass -p %s ssh -p %d %s %s@%s %s 2>&1",
+                "sshpass -p %s ssh -p %d %s %s %s 2>&1",
                 escapeshellarg($this->data['password']),
-                $this->data['port'],
+                $port,
                 $sshOptions,
-                $this->data['username'],
-                $this->data['host'],
+                $target,
                 $escapedBaseCommand
             );
             $output = shell_exec($sshCommandNoSudo) ?? '';
@@ -571,6 +629,9 @@ class VpnServer
         $sshOptions = '-o LogLevel=ERROR -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no';
         $keyFile = '';
 
+        $target = Ssh::target((string) $this->data['username'], (string) $this->data['host']);
+        $port = Ssh::port($this->data['port']);
+
         if (!empty($this->data['ssh_key'])) {
             $keyFile = tempnam(sys_get_temp_dir(), 'sshkey');
             file_put_contents($keyFile, self::normalizeSshKey($this->data['ssh_key']));
@@ -581,11 +642,10 @@ class VpnServer
             $escapedCommand = escapeshellarg($preparedCommand);
 
             $sshCommand = sprintf(
-                "ssh -p %d %s %s@%s %s 2>&1",
-                $this->data['port'],
+                "ssh -p %d %s %s %s 2>&1",
+                $port,
                 $sshOptions,
-                $this->data['username'],
-                $this->data['host'],
+                $target,
                 $escapedCommand
             );
         } else {
@@ -595,12 +655,11 @@ class VpnServer
 
             $sshOptions .= " -o PreferredAuthentications=password -o PubkeyAuthentication=no";
             $sshCommand = sprintf(
-                "sshpass -p %s ssh -p %d %s %s@%s %s 2>&1",
+                "sshpass -p %s ssh -p %d %s %s %s 2>&1",
                 escapeshellarg($this->data['password']),
-                $this->data['port'],
+                $port,
                 $sshOptions,
-                $this->data['username'],
-                $this->data['host'],
+                $target,
                 $escapedCommand
             );
         }
@@ -677,8 +736,11 @@ ENTRYPOINT [ "dumb-init", "/opt/amnezia/start.sh" ]
 CMD [ "" ]
 DOCKERFILE;
 
-        $escaped = addslashes(trim($dockerfile));
-        $this->executeCommand("echo \"{$escaped}\" > /opt/amnezia/amnezia-awg/Dockerfile", true);
+        $this->executeCommand(
+            'echo ' . Ssh::remoteArg(base64_encode(trim($dockerfile)))
+            . ' | base64 -d > /opt/amnezia/amnezia-awg/Dockerfile',
+            true
+        );
     }
 
     /**
@@ -727,8 +789,11 @@ iptables -t nat -A POSTROUTING -s 10.8.1.0/24 -o eth1 -j MASQUERADE 2>/dev/null 
 tail -f /dev/null
 BASH;
 
-        $escaped = addslashes(trim($script));
-        $this->executeCommand("echo \"{$escaped}\" > /opt/amnezia/amnezia-awg/start.sh", true);
+        $this->executeCommand(
+            'echo ' . Ssh::remoteArg(base64_encode(trim($script)))
+            . ' | base64 -d > /opt/amnezia/amnezia-awg/start.sh',
+            true
+        );
         $this->executeCommand("chmod +x /opt/amnezia/amnezia-awg/start.sh", true);
     }
 
@@ -814,8 +879,12 @@ BASH;
         }
         $wgConfig .= "\n";
 
-        $escaped = addslashes($wgConfig);
-        $this->executeCommand("docker exec -i {$containerName} sh -c 'echo \"{$escaped}\" > /opt/amnezia/awg/wg0.conf'", true);
+        $this->executeCommand(
+            'echo ' . Ssh::remoteArg(base64_encode($wgConfig))
+            . ' | base64 -d | docker exec -i ' . Ssh::remoteArg($containerName)
+            . ' tee /opt/amnezia/awg/wg0.conf > /dev/null',
+            true
+        );
         $this->executeCommand("docker exec -i {$containerName} chmod 600 /opt/amnezia/awg/wg0.conf", true);
 
         // Create clientsTable
