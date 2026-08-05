@@ -1111,29 +1111,6 @@ Router::post('/servers/{id}/config/import', function ($params) {
 });
 
 // Delete server
-Router::post('/servers/{id}/delete', function ($params) {
-    requireAuth();
-    $serverId = (int) $params['id'];
-
-    try {
-        $server = new VpnServer($serverId);
-        $serverData = $server->getData();
-
-        // Check ownership
-        $user = Auth::user();
-        if ($serverData['user_id'] != $user['id'] && !Auth::isAdmin()) {
-            http_response_code(403);
-            echo 'Forbidden';
-            return;
-        }
-
-        $server->delete();
-        redirect('/servers');
-    } catch (Exception $e) {
-        redirect('/servers');
-    }
-});
-
 // Create client for server
 Router::post('/servers/{id}/clients/create', function ($params) {
     requireAuth();
