@@ -28,6 +28,7 @@ require_once __DIR__ . '/../inc/PanelImporter.php';
 require_once __DIR__ . '/../inc/ServerMonitoring.php';
 require_once __DIR__ . '/../inc/BackupLibrary.php';
 require_once __DIR__ . '/../inc/InstallProtocolManager.php';
+require_once __DIR__ . '/../inc/Awg31Parameters.php';
 require_once __DIR__ . '/../inc/ProtocolService.php';
 require_once __DIR__ . '/../inc/OpenRouterService.php';
 
@@ -1219,9 +1220,11 @@ Router::get('/clients/{id}', function ($params) {
         $server = new VpnServer((int) $clientData['server_id']);
         $serverData = $server->getData();
         $protocolOutput = '';
-        $qrCodeVpnUrl = '';
+        $qrCodeVpnParts = [];
         $vpnUrlConfig = '';
         $isAwg2 = false;
+        $isAwg31 = false;
+        $protocolSlug = '';
         try {
             $pdo = DB::conn();
             $protocol = null;
@@ -1239,10 +1242,11 @@ Router::get('/clients/{id}', function ($params) {
                 $clientData['show_text_content'] = !empty($protocol['show_text_content']);
                 $protocolSlug = $protocol['slug'] ?? '';
                 $isAwg2 = ($protocolSlug === 'awg2');
+                $isAwg31 = ($protocolSlug === 'awg31');
             }
             if ($protocol && ($protocol['output_template'] ?? '') !== '') {
                 $slug = $protocol['slug'] ?? '';
-                $isWireguard = in_array($slug, ['amnezia-wg-advanced', 'wireguard-standard', 'amnezia-wg', 'awg2'], true);
+                $isWireguard = in_array($slug, ['amnezia-wg-advanced', 'wireguard-standard', 'amnezia-wg', 'awg2', 'awg31'], true);
                 if ($isWireguard) {
                     // For WG, we don't render protocol_output; config is downloadable
                     $protocolOutput = '';
@@ -1252,16 +1256,21 @@ Router::get('/clients/{id}', function ($params) {
                 }
             }
             
-            // Generate second QR code and vpn:// config for AWG2
-            if ($isAwg2 && !empty($clientData['config'])) {
+            // Generate current QR images from the stored config. This repairs old
+            // clients whose database QR used an incomplete multipart header,
+            // without changing their keys, peer, status, or config.
+            if (($isAwg2 || $isAwg31) && !empty($clientData['config'])) {
                 try {
-                    $qrCodeVpnUrl = VpnClient::generateQRCodeVpnUrl($clientData['config'], 'awg2');
-                    
-                    // Generate vpn:// URL string using vpn:// format (JSON + zlib)
+                    $clientData['qr_code'] = VpnClient::generateQRCode($clientData['config'], $protocolSlug);
+                    $qrCodeVpnParts = VpnClient::generateQRCodeVpnParts($clientData['config'], $protocolSlug);
+
+                    // The vpn:// value is the copy/paste format. Camera QR parts
+                    // use QDataStream framing and intentionally omit this scheme.
                     require_once __DIR__ . '/../inc/QrUtil.php';
-                    $vpnUrlConfig = 'vpn://' . QrUtil::encodeVpnUrlConf($clientData['config'], 'awg2');
+                    $vpnUrlConfig = 'vpn://' . QrUtil::encodeVpnUrlConf($clientData['config'], $protocolSlug);
                 } catch (Exception $e) {
-                    // Ignore errors, just don't show the second QR
+                    $clientData['qr_code'] = '';
+                    $qrCodeVpnParts = [];
                 }
             }
         } catch (Exception $e) {
@@ -1270,9 +1279,11 @@ Router::get('/clients/{id}', function ($params) {
         View::render('clients/view.twig', [
             'client' => $clientData,
             'protocol_output' => $protocolOutput,
-            'qr_code_vpn_url' => $qrCodeVpnUrl,
+            'qr_code_vpn_parts' => $qrCodeVpnParts,
             'vpn_url_config' => $vpnUrlConfig,
-            'is_awg2' => $isAwg2
+            'is_awg2' => $isAwg2,
+            'is_awg31' => $isAwg31,
+            'is_awg_family_export' => ($isAwg2 || $isAwg31)
         ]);
     } catch (Exception $e) {
         http_response_code(404);
@@ -1414,16 +1425,20 @@ Router::get('/debug/awg-smoke', function () {
         $regen = $client->regenerateConfigFromServer(true);
 
         $server->refresh();
-        $serverData = $server->getData();
+        $serverData = VpnClient::resolveProtocolServerData($server, (int) ($clientData['protocol_id'] ?? 0));
 
         $containerName = $serverData['container_name'] ?? 'amnezia-awg';
         $vpnPort = (int) ($serverData['vpn_port'] ?? 0);
+        $runtimeSlug = (string) ($serverData['install_protocol'] ?? '');
+        $wgTool = in_array($runtimeSlug, ['awg2', 'awg31'], true) ? 'awg' : 'wg';
+        $wgInterface = in_array($runtimeSlug, ['awg2', 'awg31'], true) ? 'awg0' : 'wg0';
+        $wgConfig = $wgInterface . '.conf';
 
-        $cmdShow = sprintf('docker exec %s wg show wg0 2>/dev/null || true', escapeshellarg($containerName));
-        $cmdDump = sprintf('docker exec %s wg show wg0 dump 2>/dev/null || true', escapeshellarg($containerName));
+        $cmdShow = sprintf('docker exec %s %s show %s 2>/dev/null || true', escapeshellarg($containerName), $wgTool, $wgInterface);
+        $cmdDump = sprintf('docker exec %s %s show %s dump 2>/dev/null || true', escapeshellarg($containerName), $wgTool, $wgInterface);
         $cmdAwgConfParams = sprintf(
-            'docker exec %s sh -c "grep -E \"^[[:space:]]*(Jc|Jmin|Jmax|S1|S2|H1|H2|H3|H4)[[:space:]]*=\" /opt/amnezia/awg/wg0.conf 2>/dev/null || true"',
-            escapeshellarg($containerName)
+            'docker exec %s sh -c "grep -E \"^[[:space:]]*(Jc|Jmin|Jmax|S1|S2|S3|S4|H1|H2|H3|H4|I[1-5]|HeaderProtectionKey|ContentPaddingAddition|RekeyAfterTime|RekeyTimeout|RejectAfterTime|KeepaliveTimeout|MaxHandshakeAttempts|RandomTrailers|DisableCookies)[[:space:]]*=\" /opt/amnezia/awg/%s 2>/dev/null || true"',
+            escapeshellarg($containerName), escapeshellarg($wgConfig)
         );
         $cmdListen = $vpnPort > 0
             ? sprintf('docker exec %s sh -c "ss -lunp 2>/dev/null | grep -E \"[:.]%d\\b\" || true"', escapeshellarg($containerName), $vpnPort)
@@ -1534,7 +1549,7 @@ Router::get('/debug/awg-smoke', function () {
                 'host' => (string) ($serverData['host'] ?? ''),
                 'container_name' => (string) $containerName,
                 'vpn_port' => $vpnPort,
-                'awg_params_db' => json_decode($serverData['awg_params'] ?? '{}', true),
+                'awg_params_sha256' => hash('sha256', (string) ($serverData['awg_params'] ?? '')),
             ],
             'client' => [
                 'id' => (int) $clientId,
@@ -1542,8 +1557,8 @@ Router::get('/debug/awg-smoke', function () {
                 'public_key' => (string) ($clientData['public_key'] ?? ''),
                 'client_ip' => (string) ($clientData['client_ip'] ?? ''),
             ],
-            'regen' => $regen,
-            'awg_conf_param_lines' => $awgConfLines,
+            'regen_success' => is_array($regen) ? (bool) ($regen['success'] ?? true) : (bool) $regen,
+            'awg_conf_param_lines_sha256' => hash('sha256', (string) $awgConfLines),
             'container_listen' => $listenLines,
             'host_global_ips' => $hostIps,
             'docker_port_publish' => $dockerPort,
@@ -1565,15 +1580,15 @@ Router::get('/debug/awg-smoke', function () {
             'iptables_counter_bytes_before' => $iptBytesBefore,
             'iptables_counter_bytes_after' => $iptBytesAfter,
             'iptables_counter_bytes_delta' => ($iptBytesBefore !== null && $iptBytesAfter !== null) ? ($iptBytesAfter - $iptBytesBefore) : null,
-            'peer_dump_line_before' => $peerLineBefore,
-            'peer_dump_line_after' => $peerLineAfter,
+            'peer_dump_line_before_sha256' => $peerLineBefore !== '' ? hash('sha256', $peerLineBefore) : null,
+            'peer_dump_line_after_sha256' => $peerLineAfter !== '' ? hash('sha256', $peerLineAfter) : null,
             'psk_match' => $pskMatches,
-            'client_config_psk_prefix' => $configPsk !== '' ? substr($configPsk, 0, 8) : '',
-            'dump_psk_prefix' => $dumpPskAfter !== '' ? substr($dumpPskAfter, 0, 8) : '',
-            'wg_show_before' => $wgShowBefore,
-            'wg_dump_before' => $wgDumpBefore,
-            'wg_show_after' => $wgShowAfter,
-            'wg_dump_after' => $wgDumpAfter,
+            'client_config_psk_sha256' => $configPsk !== '' ? hash('sha256', $configPsk) : '',
+            'dump_psk_sha256' => $dumpPskAfter !== '' ? hash('sha256', $dumpPskAfter) : '',
+            'wg_show_before_sha256' => hash('sha256', (string) $wgShowBefore),
+            'wg_dump_before_sha256' => hash('sha256', (string) $wgDumpBefore),
+            'wg_show_after_sha256' => hash('sha256', (string) $wgShowAfter),
+            'wg_dump_after_sha256' => hash('sha256', (string) $wgDumpAfter),
             'duration_seconds' => $duration,
         ], JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
     } catch (Throwable $e) {
@@ -1924,10 +1939,11 @@ Router::post('/api/servers/create', function () {
     $port = (int) ($input['port'] ?? 22);
     $username = trim($input['username'] ?? 'root');
     $password = $input['password'] ?? '';
+    $sshKey = $input['ssh_key'] ?? '';
 
-    if (empty($name) || empty($host) || empty($password)) {
+    if (empty($name) || empty($host) || (empty($password) && empty($sshKey))) {
         http_response_code(400);
-        echo json_encode(['error' => 'Missing required fields: name, host, password']);
+        echo json_encode(['error' => 'Missing required fields: name, host, and password or ssh_key']);
         return;
     }
 
@@ -1939,6 +1955,9 @@ Router::post('/api/servers/create', function () {
             'port' => $port,
             'username' => $username,
             'password' => $password,
+            'ssh_key' => $sshKey,
+            'container_name' => $input['container_name'] ?? null,
+            'vpn_subnet' => $input['vpn_subnet'] ?? null,
             'install_protocol' => trim($input['install_protocol'] ?? ''),
             'install_options' => $input['install_options'] ?? null,
         ]);
@@ -2266,7 +2285,7 @@ Router::get('/api/clients/{id}/details', function ($params) {
         $clientData = $client->getData();
 
         // Check ownership
-        if ($clientData['user_id'] != $user['id']) {
+        if ($clientData['user_id'] != $user['id'] && ($user['role'] ?? '') !== 'admin') {
             http_response_code(403);
             echo json_encode(['error' => 'Forbidden']);
             return;
@@ -2279,6 +2298,22 @@ Router::get('/api/clients/{id}/details', function ($params) {
         $client = new VpnClient($clientId);
         $clientData = $client->getData();
         $stats = $client->getFormattedStats();
+        $clientProtocolSlug = '';
+        if (!empty($clientData['protocol_id'])) {
+            $stmtProtocol = DB::conn()->prepare('SELECT slug FROM protocols WHERE id = ? LIMIT 1');
+            $stmtProtocol->execute([(int) $clientData['protocol_id']]);
+            $clientProtocolSlug = (string) $stmtProtocol->fetchColumn();
+        }
+        $isAwgFamily = in_array($clientProtocolSlug, ['awg2', 'awg31'], true);
+        $vpnUrl = $isAwgFamily
+            ? 'vpn://' . QrUtil::encodeVpnUrlConf((string) $clientData['config'], $clientProtocolSlug)
+            : null;
+        $currentQrCode = $isAwgFamily
+            ? VpnClient::generateQRCode((string) $clientData['config'], $clientProtocolSlug)
+            : $clientData['qr_code'];
+        $vpnQrCodes = $isAwgFamily
+            ? VpnClient::generateQRCodeVpnParts((string) $clientData['config'], $clientProtocolSlug)
+            : [];
 
         echo json_encode([
             'success' => true,
@@ -2294,7 +2329,11 @@ Router::get('/api/clients/{id}/details', function ($params) {
                 'bytes_received' => $clientData['bytes_received'],
                 'last_handshake' => $clientData['last_handshake'],
                 'config' => $clientData['config'],
-                'qr_code' => $clientData['qr_code'],
+                'qr_code' => $currentQrCode,
+                'vpn_qr_codes' => $vpnQrCodes,
+                'protocol_id' => $clientData['protocol_id'],
+                'protocol_slug' => $clientProtocolSlug,
+                'vpn_url' => $vpnUrl,
             ]
         ]);
     } catch (Exception $e) {
@@ -2318,16 +2357,30 @@ Router::get('/api/clients/{id}/qr', function ($params) {
         $clientData = $client->getData();
 
         // Check ownership
-        if ($clientData['user_id'] != $user['id']) {
+        if ($clientData['user_id'] != $user['id'] && ($user['role'] ?? '') !== 'admin') {
             http_response_code(403);
             echo json_encode(['error' => 'Forbidden']);
             return;
         }
 
+        $protocolSlug = '';
+        if (!empty($clientData['protocol_id'])) {
+            $stmtProtocol = DB::conn()->prepare('SELECT slug FROM protocols WHERE id = ? LIMIT 1');
+            $stmtProtocol->execute([(int) $clientData['protocol_id']]);
+            $protocolSlug = (string) $stmtProtocol->fetchColumn();
+        }
+        $isAwgFamily = in_array($protocolSlug, ['awg2', 'awg31'], true);
         echo json_encode([
             'success' => true,
-            'qr_code' => $clientData['qr_code'],
-            'client_name' => $clientData['name']
+            'qr_code' => $isAwgFamily
+                ? VpnClient::generateQRCode((string) $clientData['config'], $protocolSlug)
+                : $clientData['qr_code'],
+            'vpn_qr_codes' => $isAwgFamily
+                ? VpnClient::generateQRCodeVpnParts((string) $clientData['config'], $protocolSlug)
+                : [],
+            'client_name' => $clientData['name'],
+            'protocol_id' => $clientData['protocol_id'],
+            'vpn_url' => $isAwgFamily ? 'vpn://' . QrUtil::encodeVpnUrlConf((string) $clientData['config'], $protocolSlug) : null,
         ]);
     } catch (Exception $e) {
         http_response_code(404);
@@ -2716,7 +2769,22 @@ Router::post('/api/servers/{id}/protocols/install', function ($params) {
             return;
         }
 
-        $result = InstallProtocolManager::activate($server, $protocol, []);
+        $options = [];
+        if (($protocol['slug'] ?? '') === 'awg31') {
+            $rawSettings = $input['settings'] ?? [];
+            if (!is_array($rawSettings)) {
+                throw new InvalidArgumentException('settings must be an object');
+            }
+            $options['settings'] = Awg31Parameters::normalize(array_merge(Awg31Parameters::defaults(), $rawSettings));
+            foreach (['HeaderProtectionKey', 'I1'] as $requiredFreshField) {
+                if (($options['settings'][$requiredFreshField] ?? '') === '') {
+                    throw new InvalidArgumentException($requiredFreshField . ' cannot be empty for a fresh install');
+                }
+            }
+        } elseif (array_key_exists('settings', $input)) {
+            throw new InvalidArgumentException('settings is supported only for awg31');
+        }
+        $result = InstallProtocolManager::activate($server, $protocol, $options);
 
         // Keep API behavior consistent with UI flow: once protocol activation succeeds,
         // clear transient error state and mark server as active for client creation.
@@ -2727,7 +2795,7 @@ Router::post('/api/servers/{id}/protocols/install', function ($params) {
         }
         echo json_encode($result, JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
     } catch (Exception $e) {
-        http_response_code(500);
+        http_response_code($e instanceof InvalidArgumentException ? 400 : 500);
         echo json_encode(['error' => $e->getMessage()]);
     }
 });
@@ -2860,6 +2928,17 @@ Router::post('/api/servers/{id}/protocols/selftest', function ($params) {
         }
 
         $clientData = $client->getData();
+        $clientProtocolId = (int) ($clientData['protocol_id'] ?? 0);
+        if ($protocolId > 0 && $clientProtocolId > 0 && $clientProtocolId !== $protocolId) {
+            http_response_code(400);
+            echo json_encode(['error' => 'client_id does not belong to protocol_id']);
+            return;
+        }
+        $effectiveProtocolId = $protocolId > 0 ? $protocolId : $clientProtocolId;
+        $serverData = VpnClient::resolveProtocolServerData($server, $effectiveProtocolId);
+        $runtimeSlug = (string) ($serverData['install_protocol'] ?? '');
+        $wgTool = in_array($runtimeSlug, ['awg2', 'awg31'], true) ? 'awg' : 'wg';
+        $wgInterface = in_array($runtimeSlug, ['awg2', 'awg31'], true) ? 'awg0' : 'wg0';
         $config = $client->getConfig();
 
         $cfgPrivate = $extract($config, 'PrivateKey');
@@ -2887,7 +2966,7 @@ Router::post('/api/servers/{id}/protocols/selftest', function ($params) {
             $err = (string) ($derived['error'] ?? 'derive_failed');
             // If we can't derive locally (e.g., libsodium missing), fall back to wg inside container.
             if ($err === 'libsodium_not_available') {
-                $shComputePub = "set -e; priv=" . escapeshellarg($cfgPrivate) . "; printf '%s' \"\$priv\" | wg pubkey";
+                $shComputePub = "set -e; priv=" . escapeshellarg($cfgPrivate) . "; printf '%s' \"\$priv\" | " . $wgTool . " pubkey";
                 $cmdComputePub = "docker exec -i " . escapeshellarg($containerName) . " sh -c " . escapeshellarg($shComputePub);
                 $computedClientPub = trim($server->executeCommand($cmdComputePub, true));
             } else {
@@ -2895,16 +2974,16 @@ Router::post('/api/servers/{id}/protocols/selftest', function ($params) {
             }
         }
 
-        $cmdServerPub = "docker exec -i " . escapeshellarg($containerName) . " sh -c " . escapeshellarg("wg show wg0 2>/dev/null | awk '/public key:/ {print \$3; exit}' || true");
+        $cmdServerPub = "docker exec -i " . escapeshellarg($containerName) . " sh -c " . escapeshellarg($wgTool . " show " . $wgInterface . " 2>/dev/null | awk '/public key:/ {print \$3; exit}' || true");
         $serverPubLive = trim($server->executeCommand($cmdServerPub, true));
 
-        $cmdServerPort = "docker exec -i " . escapeshellarg($containerName) . " sh -c " . escapeshellarg("wg show wg0 2>/dev/null | awk '/listening port:/ {print \$3; exit}' || true");
+        $cmdServerPort = "docker exec -i " . escapeshellarg($containerName) . " sh -c " . escapeshellarg($wgTool . " show " . $wgInterface . " 2>/dev/null | awk '/listening port:/ {print \$3; exit}' || true");
         $serverPortLive = trim($server->executeCommand($cmdServerPort, true));
 
         $cmdPskFile = "docker exec -i " . escapeshellarg($containerName) . " sh -c " . escapeshellarg("cat /opt/amnezia/awg/wireguard_psk.key 2>/dev/null || true");
         $serverPskFile = trim($server->executeCommand($cmdPskFile, true));
 
-        $cmdDump = "docker exec -i " . escapeshellarg($containerName) . " sh -c " . escapeshellarg("wg show wg0 dump 2>/dev/null || true");
+        $cmdDump = "docker exec -i " . escapeshellarg($containerName) . " sh -c " . escapeshellarg($wgTool . " show " . $wgInterface . " dump 2>/dev/null || true");
         $dump = (string) $server->executeCommand($cmdDump, true);
 
         $targetPeerPub = $computedClientPub;
@@ -2933,7 +3012,7 @@ Router::post('/api/servers/{id}/protocols/selftest', function ($params) {
                 continue;
             }
             // Skip interface line: starts with interface name 'wg0'
-            if ($parts[0] === 'wg0') {
+            if ($parts[0] === $wgInterface) {
                 continue;
             }
             if ($targetPeerPub !== '' && hash_equals($parts[0], $targetPeerPub)) {
@@ -2953,6 +3032,7 @@ Router::post('/api/servers/{id}/protocols/selftest', function ($params) {
 
         $checks = [];
         $mismatches = [];
+        $peerPskLive = $peer !== null ? (string) ($peer['preshared_key'] ?? '') : '';
 
         $dbClientPub = (string) ($clientData['public_key'] ?? '');
         if ($dbClientPub !== '' && $computedClientPub !== '' && !hash_equals($dbClientPub, $computedClientPub)) {
@@ -2961,12 +3041,58 @@ Router::post('/api/servers/{id}/protocols/selftest', function ($params) {
         if ($serverPubLive !== '' && $cfgServerPub !== '' && !hash_equals($serverPubLive, $cfgServerPub)) {
             $mismatches[] = 'server_public_key_mismatch';
         }
-        if ($serverPskFile !== '' && $cfgPsk !== '' && !hash_equals($serverPskFile, $cfgPsk)) {
+        $expectedPsk = $peerPskLive !== '' ? $peerPskLive : $serverPskFile;
+        if ($expectedPsk !== '' && $cfgPsk !== '' && !hash_equals($expectedPsk, $cfgPsk)) {
             $mismatches[] = 'preshared_key_mismatch';
         }
         if ($peer === null) {
             $mismatches[] = 'peer_not_found_on_server';
         }
+        if ($peer !== null && isset($peer['preshared_key'])) {
+            $peer['preshared_key_sha256'] = hash('sha256', (string) $peer['preshared_key']);
+            unset($peer['preshared_key']);
+        }
+        $endpointPort = 0;
+        if (preg_match('/:(\d+)$/', $cfgEndpoint, $endpointMatch)) $endpointPort = (int) $endpointMatch[1];
+        if ($endpointPort > 0 && $serverPortLive !== '' && $endpointPort !== (int) $serverPortLive) {
+            $mismatches[] = 'endpoint_port_mismatch';
+        }
+        $dockerPublished = trim($server->executeCommand('docker port ' . escapeshellarg($containerName) . ' ' . escapeshellarg($serverPortLive . '/udp') . " 2>/dev/null | head -1 | sed 's/.*://'", true));
+        if ($endpointPort > 0 && (!ctype_digit($dockerPublished) || $endpointPort !== (int) $dockerPublished)) {
+            $mismatches[] = 'docker_published_port_mismatch';
+        }
+        $configName = $wgInterface . '.conf';
+        $liveConfigSha = trim($server->executeCommand("docker exec -i " . escapeshellarg($containerName) . " sha256sum /opt/amnezia/awg/" . escapeshellarg($configName) . " | awk '{print \$1}'", true));
+        $liveConfig = (string) $server->executeCommand("docker exec -i " . escapeshellarg($containerName) . " cat /opt/amnezia/awg/" . escapeshellarg($configName), true);
+        $clientSettings = $runtimeSlug === 'awg31' ? Awg31Parameters::parseInterface($config) : [];
+        $liveSettings = $runtimeSlug === 'awg31' ? Awg31Parameters::parseInterface($liveConfig) : [];
+        $storedRaw = [];
+        if ($runtimeSlug === 'awg31' && $effectiveProtocolId > 0) {
+            $storedStmt = DB::conn()->prepare('SELECT config_data FROM server_protocols WHERE server_id = ? AND protocol_id = ? LIMIT 1');
+            $storedStmt->execute([$serverId, $effectiveProtocolId]);
+            $storedConfig = json_decode((string) $storedStmt->fetchColumn(), true) ?: [];
+            $storedRaw = $storedConfig['extras']['awg_params'] ?? [];
+        }
+        $storedSettings = $runtimeSlug === 'awg31' ? Awg31Parameters::normalizeKeysOnly((array) $storedRaw) : [];
+        $settingsMismatches = [];
+        if ($runtimeSlug === 'awg31') {
+            foreach (Awg31Parameters::fields() as $field) {
+                $clientValue = (string) ($clientSettings[$field] ?? '');
+                $liveValue = (string) ($liveSettings[$field] ?? '');
+                $storedValue = (string) ($storedSettings[$field] ?? '');
+                if ($clientValue !== $liveValue || ($containerName === 'amnezia-awg31' && $storedValue !== $liveValue)) $settingsMismatches[] = $field;
+            }
+            if ($settingsMismatches) $mismatches[] = 'effective_settings_mismatch';
+        }
+        $imageId = trim($server->executeCommand("docker inspect " . escapeshellarg($containerName) . " --format '{{.Image}}'", true));
+        $runtimeCommit = trim($server->executeCommand("docker image inspect " . escapeshellarg($imageId) . " --format '{{index .Config.Labels \"org.opencontainers.image.revision\"}}'", true));
+        $toolsCommit = trim($server->executeCommand("docker image inspect " . escapeshellarg($imageId) . " --format '{{index .Config.Labels \"io.amnezia.awgtools.revision\"}}'", true));
+        $engineBinarySha = trim($server->executeCommand("docker exec -i " . escapeshellarg($containerName) . " sha256sum /usr/bin/amneziawg-go | awk '{print \$1}'", true));
+        $toolsBinarySha = trim($server->executeCommand("docker exec -i " . escapeshellarg($containerName) . " sha256sum /usr/bin/awg | awk '{print \$1}'", true));
+        $expectedRuntime = 'b5928efb6ca19f0153958460c3d141f04abc5c2e';
+        $expectedTools = 'ee0f0a9aa34ff0a0da4b3433b9512781cfe02843';
+        if ($runtimeSlug === 'awg31' && $containerName === 'amnezia-awg31' && $runtimeCommit !== $expectedRuntime) $mismatches[] = 'runtime_commit_mismatch';
+        if ($runtimeSlug === 'awg31' && $containerName === 'amnezia-awg31' && $toolsCommit !== $expectedTools) $mismatches[] = 'tools_commit_mismatch';
 
         $checks['client_public_key'] = [
             'db' => $dbClientPub,
@@ -2979,9 +3105,24 @@ Router::post('/api/servers/{id}/protocols/selftest', function ($params) {
             'ok' => ($cfgServerPub === '' || $serverPubLive === '') ? null : hash_equals($cfgServerPub, $serverPubLive),
         ];
         $checks['preshared_key'] = [
-            'config' => $includeSecrets ? $cfgPsk : ($cfgPsk !== '' ? (substr($cfgPsk, 0, 6) . '...') : ''),
-            'server_file' => $includeSecrets ? $serverPskFile : ($serverPskFile !== '' ? (substr($serverPskFile, 0, 6) . '...') : ''),
-            'ok' => ($cfgPsk === '' || $serverPskFile === '') ? null : hash_equals($cfgPsk, $serverPskFile),
+            'config_sha256' => $cfgPsk !== '' ? hash('sha256', $cfgPsk) : '',
+            'expected_source' => $peerPskLive !== '' ? 'peer' : 'server_file_fallback',
+            'expected_sha256' => $expectedPsk !== '' ? hash('sha256', $expectedPsk) : '',
+            'ok' => ($cfgPsk === '' || $expectedPsk === '') ? null : hash_equals($cfgPsk, $expectedPsk),
+        ];
+        $canonicalSettings = static function (array $values): array {
+            $out = [];
+            foreach (Awg31Parameters::fields() as $field) {
+                if (array_key_exists($field, $values) && (string) $values[$field] !== '') $out[$field] = (string) $values[$field];
+            }
+            return $out;
+        };
+        $checks['effective_settings'] = [
+            'client_sha256' => hash('sha256', json_encode($canonicalSettings($clientSettings), JSON_UNESCAPED_SLASHES)),
+            'live_sha256' => hash('sha256', json_encode($canonicalSettings($liveSettings), JSON_UNESCAPED_SLASHES)),
+            'stored_sha256' => hash('sha256', json_encode($canonicalSettings($storedSettings), JSON_UNESCAPED_SLASHES)),
+            'mismatched_fields' => $settingsMismatches,
+            'ok' => !$settingsMismatches,
         ];
 
         echo json_encode([
@@ -2996,7 +3137,7 @@ Router::post('/api/servers/{id}/protocols/selftest', function ($params) {
                 'public_key_computed' => $computedClientPub,
                 'address_in_config' => $cfgAddress,
                 'endpoint_in_config' => $cfgEndpoint,
-                'private_key' => $includeSecrets ? $cfgPrivate : ($cfgPrivate !== '' ? (substr($cfgPrivate, 0, 6) . '...') : ''),
+                'private_key' => $cfgPrivate !== '' ? '[redacted]' : '',
             ],
             'wg' => [
                 'server_public_key_live' => $serverPubLive,
@@ -3004,6 +3145,14 @@ Router::post('/api/servers/{id}/protocols/selftest', function ($params) {
                 'peer' => $peer,
             ],
             'checks' => $checks,
+            'runtime' => [
+                'container' => $containerName, 'interface' => $wgInterface, 'tool' => $wgTool,
+                'config_sha256' => $liveConfigSha, 'image_id' => $imageId,
+                'runtime_commit' => $runtimeCommit, 'tools_commit' => $toolsCommit,
+                'engine_binary_sha256' => $engineBinarySha, 'tools_binary_sha256' => $toolsBinarySha,
+                'endpoint_port' => $endpointPort, 'live_port' => (int) $serverPortLive,
+                'docker_published_port' => ctype_digit($dockerPublished) ? (int) $dockerPublished : null,
+            ],
             'mismatches' => $mismatches,
         ], JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
     } catch (Exception $e) {
@@ -3053,6 +3202,7 @@ Router::post('/api/servers/{id}/protocols/diagnose-handshake', function ($params
     }
 
     $clientId = isset($data['client_id']) ? (int) $data['client_id'] : 0;
+    $protocolId = isset($data['protocol_id']) ? (int) $data['protocol_id'] : 0;
     $duration = isset($data['duration_seconds']) ? (int) $data['duration_seconds'] : 5;
     if ($duration < 1)
         $duration = 1;
@@ -3094,11 +3244,14 @@ Router::post('/api/servers/{id}/protocols/diagnose-handshake', function ($params
 
         $containerName = (string) ($serverData['container_name'] ?? 'amnezia-awg');
         $vpnPort = (int) ($serverData['vpn_port'] ?? 0);
+        $primaryVpnPort = $vpnPort;
 
         // Optionally derive client public key from stored client config
         $clientPub = '';
         $clientPubError = '';
         $clientIp = '';
+        $cfg = '';
+        $cfgEndpointPort = 0;
         if ($clientId > 0) {
             $client = new VpnClient($clientId);
             $clientData = $client->getData();
@@ -3113,9 +3266,26 @@ Router::post('/api/servers/{id}/protocols/diagnose-handshake', function ($params
                 return;
             }
 
+            $clientProtocolId = (int) ($clientData['protocol_id'] ?? 0);
+            if ($protocolId > 0 && $clientProtocolId > 0 && $protocolId !== $clientProtocolId) {
+                http_response_code(400);
+                echo json_encode(['error' => 'client_id does not belong to protocol_id']);
+                return;
+            }
+            if ($protocolId <= 0) {
+                $protocolId = $clientProtocolId;
+            }
+
+            $serverData = VpnClient::resolveProtocolServerData($server, $protocolId);
+            $containerName = (string) ($serverData['container_name'] ?? 'amnezia-awg');
+            $vpnPort = (int) ($serverData['vpn_port'] ?? 0);
+            $runtimeSlug = (string) ($serverData['install_protocol'] ?? '');
+            $wgTool = in_array($runtimeSlug, ['awg2', 'awg31'], true) ? 'awg' : 'wg';
+
             $clientIp = (string) ($clientData['client_ip'] ?? '');
 
             $cfg = $client->getConfig();
+            if (preg_match('/^\s*Endpoint\s*=\s*.+:(\d+)\s*$/mi', $cfg, $endpointMatch)) $cfgEndpointPort = (int) $endpointMatch[1];
             $cfgPrivate = '';
             if (preg_match('/^\s*PrivateKey\s*=\s*(.+)\s*$/mi', $cfg, $m)) {
                 $cfgPrivate = trim($m[1]);
@@ -3127,7 +3297,7 @@ Router::post('/api/servers/{id}/protocols/diagnose-handshake', function ($params
                 } else {
                     $clientPubError = (string) ($derived['error'] ?? 'derive_failed');
                     // Fallback: compute using wg inside container (best-effort)
-                    $shComputePub = "set -e; priv=" . escapeshellarg($cfgPrivate) . "; printf '%s' \"\$priv\" | wg pubkey";
+                    $shComputePub = "set -e; priv=" . escapeshellarg($cfgPrivate) . "; printf '%s' \"\$priv\" | " . $wgTool . " pubkey";
                     $cmdComputePub = "docker exec -i " . escapeshellarg($containerName) . " sh -c " . escapeshellarg($shComputePub);
                     $computed = trim((string) $server->executeCommand($cmdComputePub, true));
                     // Basic validation: wg outputs a 44-char base64 key
@@ -3141,6 +3311,20 @@ Router::post('/api/servers/{id}/protocols/diagnose-handshake', function ($params
             }
         }
 
+        $storedVpnPort = $protocolId > 0 ? 0 : $primaryVpnPort;
+        if ($protocolId > 0) {
+            $portStmt = DB::conn()->prepare('SELECT config_data FROM server_protocols WHERE server_id = ? AND protocol_id = ? LIMIT 1');
+            $portStmt->execute([$serverId, $protocolId]);
+            $portConfig = json_decode((string) $portStmt->fetchColumn(), true) ?: [];
+            $storedVpnPort = (int) ($portConfig['server_port'] ?? $portConfig['extras']['vpn_port'] ?? 0);
+        }
+        $serverData = VpnClient::resolveProtocolServerData($server, $protocolId);
+        $containerName = (string) ($serverData['container_name'] ?? 'amnezia-awg');
+        $vpnPort = (int) ($serverData['vpn_port'] ?? 0);
+        $runtimeSlug = (string) ($serverData['install_protocol'] ?? '');
+        $wgTool = in_array($runtimeSlug, ['awg2', 'awg31'], true) ? 'awg' : 'wg';
+        $wgInterface = in_array($runtimeSlug, ['awg2', 'awg31'], true) ? 'awg0' : 'wg0';
+
         // Gather status
         $cmdHostDate = "date -u '+%Y-%m-%dT%H:%M:%SZ'";
         $hostDate = trim($server->executeCommand($cmdHostDate, true));
@@ -3150,11 +3334,19 @@ Router::post('/api/servers/{id}/protocols/diagnose-handshake', function ($params
 
         $cmdInspectPorts = "docker inspect " . escapeshellarg($containerName) . " --format '{{json .NetworkSettings.Ports}}' 2>/dev/null || true";
         $dockerPortsJson = trim($server->executeCommand($cmdInspectPorts, true));
+        $publishedPort = null;
+        $decodedPorts = json_decode($dockerPortsJson, true);
+        if (is_array($decodedPorts) && $vpnPort > 0) {
+            $entry = $decodedPorts[$vpnPort . '/udp'][0]['HostPort'] ?? null;
+            if (is_string($entry) && ctype_digit($entry)) $publishedPort = (int) $entry;
+        }
 
-        $cmdWgShow = "docker exec -i " . escapeshellarg($containerName) . " sh -c " . escapeshellarg("wg show wg0 2>/dev/null || true");
+        $cmdWgShow = "docker exec -i " . escapeshellarg($containerName) . " sh -c " . escapeshellarg($wgTool . " show " . $wgInterface . " 2>/dev/null || true");
         $wgShow = $server->executeCommand($cmdWgShow, true);
+        $liveInterfacePort = 0;
+        if (preg_match('/listening port:\s*(\d+)/i', (string) $wgShow, $listenMatch)) $liveInterfacePort = (int) $listenMatch[1];
 
-        $cmdWgDump = "docker exec -i " . escapeshellarg($containerName) . " sh -c " . escapeshellarg("wg show wg0 dump 2>/dev/null || true");
+        $cmdWgDump = "docker exec -i " . escapeshellarg($containerName) . " sh -c " . escapeshellarg($wgTool . " show " . $wgInterface . " dump 2>/dev/null || true");
         $wgDump = $server->executeCommand($cmdWgDump, true);
 
         $cmdHostSs = ($vpnPort > 0)
@@ -3205,7 +3397,7 @@ Router::post('/api/servers/{id}/protocols/diagnose-handshake', function ($params
             $lines = preg_split('/\r?\n/', trim($wgDump));
             foreach ($lines as $line) {
                 $line = trim($line);
-                if ($line === '' || str_starts_with($line, 'wg0')) {
+                if ($line === '' || str_starts_with($line, $wgInterface)) {
                     continue;
                 }
                 $parts = preg_split('/\s+/', $line);
@@ -3220,7 +3412,7 @@ Router::post('/api/servers/{id}/protocols/diagnose-handshake', function ($params
             $lines = preg_split('/\r?\n/', trim($wgDumpAfter));
             foreach ($lines as $line) {
                 $line = trim($line);
-                if ($line === '' || str_starts_with($line, 'wg0')) {
+                if ($line === '' || str_starts_with($line, $wgInterface)) {
                     continue;
                 }
                 $parts = preg_split('/\s+/', $line);
@@ -3235,6 +3427,9 @@ Router::post('/api/servers/{id}/protocols/diagnose-handshake', function ($params
         if ($vpnPort <= 0) {
             $hints[] = 'vpn_port is missing in DB; endpoint may be wrong';
         }
+        if ($vpnPort > 0 && $publishedPort !== $vpnPort) {
+            $hints[] = 'docker_published_port_mismatch';
+        }
         if (is_string($tcpdump) && str_contains($tcpdump, 'tcpdump_unavailable_or_timeout_missing')) {
             $hints[] = 'tcpdump/timeout not available on server; use nft counters or install tcpdump for deeper packet visibility';
         }
@@ -3244,36 +3439,82 @@ Router::post('/api/servers/{id}/protocols/diagnose-handshake', function ($params
         if ($clientPub !== '' && $peerLine === '') {
             $hints[] = 'peer not found in wg dump for derived client public key (client might not be applied on server)';
         }
+        $configName = $wgInterface . '.conf';
+        $liveConfigSha = trim($server->executeCommand("docker exec -i " . escapeshellarg($containerName) . " sha256sum /opt/amnezia/awg/" . escapeshellarg($configName) . " | awk '{print \$1}'", true));
+        $imageId = trim($server->executeCommand("docker inspect " . escapeshellarg($containerName) . " --format '{{.Image}}'", true));
+        $runtimeCommit = trim($server->executeCommand("docker image inspect " . escapeshellarg($imageId) . " --format '{{index .Config.Labels \"org.opencontainers.image.revision\"}}'", true));
+        $toolsCommit = trim($server->executeCommand("docker image inspect " . escapeshellarg($imageId) . " --format '{{index .Config.Labels \"io.amnezia.awgtools.revision\"}}'", true));
+        $pinnedMatch = $containerName === 'amnezia-awg31' ? (
+            $runtimeCommit === 'b5928efb6ca19f0153958460c3d141f04abc5c2e'
+            && $toolsCommit === 'ee0f0a9aa34ff0a0da4b3433b9512781cfe02843'
+        ) : null;
+
+        $diagMismatches = [];
+        if ($storedVpnPort <= 0 || $publishedPort !== $storedVpnPort) $diagMismatches[] = 'docker_published_port_mismatch';
+        if ($liveInterfacePort <= 0 || $liveInterfacePort !== $storedVpnPort) $diagMismatches[] = 'live_interface_port_mismatch';
+        if ($clientId > 0 && ($cfgEndpointPort <= 0 || $cfgEndpointPort !== $storedVpnPort)) $diagMismatches[] = 'client_endpoint_port_mismatch';
+        if ($clientId > 0 && $peerLine === '') $diagMismatches[] = 'peer_not_found_on_server';
+        if ($pinnedMatch === false) $diagMismatches[] = 'pinned_provenance_mismatch';
+        $diagSettings = ['client_sha256' => null, 'live_sha256' => null, 'stored_sha256' => null, 'ok' => null];
+        if (($runtimeSlug ?? '') === 'awg31' && $cfg !== '') {
+            $liveConfig = (string) $server->executeCommand('docker exec -i ' . escapeshellarg($containerName) . ' cat /opt/amnezia/awg/' . escapeshellarg($configName), true);
+            $clientParams = Awg31Parameters::parseInterface($cfg);
+            $liveParams = Awg31Parameters::parseInterface($liveConfig);
+            $storedStmt = DB::conn()->prepare('SELECT config_data FROM server_protocols WHERE server_id = ? AND protocol_id = ? LIMIT 1');
+            $storedStmt->execute([$serverId, $protocolId]);
+            $storedConfig = json_decode((string) $storedStmt->fetchColumn(), true) ?: [];
+            $storedParams = Awg31Parameters::normalizeKeysOnly((array) ($storedConfig['extras']['awg_params'] ?? []));
+            $canon = static function (array $values): array { $out = []; foreach (Awg31Parameters::fields() as $field) if (isset($values[$field]) && (string) $values[$field] !== '') $out[$field] = (string) $values[$field]; return $out; };
+            $clientCanonical = $canon($clientParams); $liveCanonical = $canon($liveParams); $storedCanonical = $canon($storedParams);
+            $settingsOk = $clientCanonical === $liveCanonical && ($containerName !== 'amnezia-awg31' || $storedCanonical === $liveCanonical);
+            if (!$settingsOk) $diagMismatches[] = 'effective_settings_mismatch';
+            $diagSettings = [
+                'client_sha256' => hash('sha256', json_encode($clientCanonical, JSON_UNESCAPED_SLASHES)),
+                'live_sha256' => hash('sha256', json_encode($liveCanonical, JSON_UNESCAPED_SLASHES)),
+                'stored_sha256' => hash('sha256', json_encode($storedCanonical, JSON_UNESCAPED_SLASHES)),
+                'ok' => $settingsOk,
+            ];
+        }
 
         echo json_encode([
-            'success' => true,
+            'success' => !$diagMismatches,
             'server_id' => $serverId,
             'checked_at_utc' => $hostDate,
             'container_name' => $containerName,
-            'vpn_port_db' => $vpnPort,
+            'vpn_port_db' => $storedVpnPort,
             'client' => [
                 'client_id' => $clientId > 0 ? $clientId : null,
                 'client_ip' => $clientIp !== '' ? $clientIp : null,
                 'client_public_key_derived' => $clientPub !== '' ? $clientPub : null,
                 'client_public_key_derive_error' => $clientPubError !== '' ? $clientPubError : null,
-                'peer_line_from_dump' => $peerLine !== '' ? $peerLine : null,
-                'peer_line_from_dump_after' => $peerLineAfter !== '' ? $peerLineAfter : null,
+                'peer_line_sha256' => $peerLine !== '' ? hash('sha256', $peerLine) : null,
+                'peer_line_after_sha256' => $peerLineAfter !== '' ? hash('sha256', $peerLineAfter) : null,
             ],
             'evidence' => [
                 'docker_ps' => $dockerPs,
                 'docker_ports_json' => $dockerPortsJson,
+                'docker_published_port' => $publishedPort,
+                'live_interface_port' => $liveInterfacePort,
+                'client_endpoint_port' => $clientId > 0 ? $cfgEndpointPort : null,
                 'host_udp_listen' => $hostUdpListen,
                 'container_udp_listen' => $containerUdpListen,
-                'wg_show' => $wgShow,
-                'wg_dump' => $wgDump,
-                'wg_show_after' => $wgShowAfter,
-                'wg_dump_after' => $wgDumpAfter,
+                'wg_show_sha256' => hash('sha256', (string) $wgShow),
+                'wg_dump_sha256' => hash('sha256', (string) $wgDump),
+                'wg_show_after_sha256' => hash('sha256', (string) $wgShowAfter),
+                'wg_dump_after_sha256' => hash('sha256', (string) $wgDumpAfter),
+                'effective_config_sha256' => $liveConfigSha,
+                'image_id' => $imageId,
+                'runtime_commit' => $runtimeCommit,
+                'tools_commit' => $toolsCommit,
+                'pinned_provenance_match' => $pinnedMatch,
+                'effective_settings' => $diagSettings,
                 'ufw' => $ufw,
                 'iptables_input_snippet' => $iptablesInput,
                 'nft_port_lines' => $nftPortLines,
                 'nft_port_lines_after' => $nftPortLinesAfter,
                 'tcpdump' => $tcpdump,
             ],
+            'mismatches' => $diagMismatches,
             'hints' => $hints,
         ], JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE);
     } catch (Exception $e) {

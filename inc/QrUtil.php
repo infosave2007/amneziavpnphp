@@ -6,6 +6,7 @@ use Endroid\QrCode\ErrorCorrectionLevel;
 use Endroid\QrCode\Label\Label;
 use Endroid\QrCode\Label\LabelAlignment;
 use Endroid\QrCode\Encoding\Encoding;
+require_once __DIR__ . '/Awg31Parameters.php';
 
 class QrUtil
 {
@@ -76,10 +77,11 @@ class QrUtil
 
     public static function encodeOldPayloadFromConf(string $confText, string $protocolSlug = ''): string
     {
-        // For AWG2, use simple format: header + plain config text (like real Amnezia app)
-        // For other protocols, use the old JSON+compression format for backward compatibility
-        if ($protocolSlug === 'awg2') {
-            return self::encodeSimpleConf($confText);
+        // The Amnezia camera importer accepts native AWG configs as plain QR text.
+        // Framing a single config as a partial multipart payload makes the app wait
+        // forever for a chunk that is not displayed.
+        if (in_array($protocolSlug, ['awg2', 'awg31'], true)) {
+            return $confText;
         }
         
         // Old format for backward compatibility with regular AWG
@@ -93,8 +95,8 @@ class QrUtil
      */
     public static function encodeVpnUrlPayload(string $confText, string $protocolSlug = ''): string
     {
-        if ($protocolSlug === 'awg2') {
-            return self::encodeVpnUrlConf($confText);
+        if (in_array($protocolSlug, ['awg2', 'awg31'], true)) {
+            return 'vpn://' . self::encodeVpnUrlConf($confText, $protocolSlug);
         }
         
         // For other protocols, use old format with vpn:// prefix
@@ -103,18 +105,10 @@ class QrUtil
         return 'vpn://' . self::encodeOldPayloadFromJson($jsonPayload);
     }
 
-    /**
-     * Encode config in simple format used by real Amnezia app for AWG2:
-     * Header (8 bytes): version (4) + length (4) + config text
-     * No compression, no JSON wrapper
-     */
+    /** Return a native AWG config for a plain, single QR image. */
     public static function encodeSimpleConf(string $confText): string
     {
-        $version = 0x07C00200; // Amnezia magic version number (updated for newer app compatibility)
-        $length = strlen($confText);
-        
-        $header = pack('N2', $version, $length);
-        return self::urlsafe_b64_encode($header . $confText);
+        return $confText;
     }
 
     /**
@@ -144,14 +138,42 @@ class QrUtil
             throw new RuntimeException('gzcompress failed');
         }
         
-        // Header: uint32 BE with uncompressed length
-        $header = pack('N', $uncompressedLength);
-        
-        // Payload: header + compressed data
-        $payload = $header . $compressed;
-        
-        // Base64url encode without padding
-        return self::urlsafe_b64_encode($payload);
+        return self::urlsafe_b64_encode(pack('N', $uncompressedLength) . $compressed);
+    }
+
+    /**
+     * Encode the native Amnezia connection as camera-importable multipart QR
+     * payloads. This mirrors QDataStream(qint16 magic, quint8 count, quint8 id,
+     * QByteArray chunk) used by the Amnezia client. The copyable vpn:// value
+     * remains a separate text format and must not be placed in these QR images.
+     *
+     * @return list<string> Base64url QR payloads in scan order
+     */
+    public static function encodeVpnQrChunks(string $confText, string $protocolSlug = '', int $maxChunkBytes = 850): array
+    {
+        if ($maxChunkBytes < 1) {
+            throw new InvalidArgumentException('QR chunk size must be positive');
+        }
+
+        $encoded = self::encodeVpnUrlConf($confText, $protocolSlug);
+        $padding = (4 - strlen($encoded) % 4) % 4;
+        $compressed = base64_decode(strtr($encoded, '-_', '+/') . str_repeat('=', $padding), true);
+        if ($compressed === false) {
+            throw new RuntimeException('Failed to decode compressed VPN payload');
+        }
+
+        $chunks = str_split($compressed, $maxChunkBytes);
+        $count = count($chunks);
+        if ($count === 0 || $count > 255) {
+            throw new RuntimeException('VPN payload has unsupported QR chunk count');
+        }
+
+        $result = [];
+        foreach ($chunks as $id => $chunk) {
+            $frame = pack('nCCN', 0x07C0, $count, $id, strlen($chunk)) . $chunk;
+            $result[] = self::urlsafe_b64_encode($frame);
+        }
+        return $result;
     }
 
     /**
@@ -258,7 +280,7 @@ class QrUtil
                 $allowedIps = array_map('trim', preg_split('/[,\s]+/', $v));
             } elseif (stripos($line, 'PersistentKeepalive') === 0 && strpos($line, '=') !== false) {
                 [, $v] = array_map('trim', explode('=', $line, 2));
-                $keepAlive = (int) $v;
+                $keepAlive = $v;
             }
         }
 
@@ -303,6 +325,11 @@ class QrUtil
             'S3' => null,
             'S4' => null,
         ];
+        if ($protocolSlug === 'awg31') {
+            foreach (Awg31Parameters::fields() as $field) {
+                $params[$field] = null;
+            }
+        }
         foreach (explode("\n", $conf) as $line) {
             $line = trim($line);
             foreach (array_keys($params) as $k) {
@@ -344,6 +371,13 @@ class QrUtil
             'psk_key' => (string) ($psk ?? ''),
             'server_pub_key' => (string) ($pubKeyServer ?? ''),
         ];
+        if ($protocolSlug === 'awg31') {
+            foreach (Awg31Parameters::fields() as $field) {
+                if (array_key_exists($field, $params) && $params[$field] !== null && $params[$field] !== '') {
+                    $lastConfigObj[$field] = (string) $params[$field];
+                }
+            }
+        }
 
         $serverDesc = self::resolveServerDescription($endpointHost);
 
@@ -418,7 +452,7 @@ class QrUtil
                 $allowedIps = array_map('trim', preg_split('/[,\s]+/', $v));
             } elseif (stripos($line, 'PersistentKeepalive') === 0 && strpos($line, '=') !== false) {
                 [, $v] = array_map('trim', explode('=', $line, 2));
-                $keepAlive = (int) $v;
+                $keepAlive = $v;
             }
         }
 
@@ -463,6 +497,11 @@ class QrUtil
             'S3' => null,
             'S4' => null,
         ];
+        if ($protocolSlug === 'awg31') {
+            foreach (Awg31Parameters::fields() as $field) {
+                $params[$field] = null;
+            }
+        }
         foreach (explode("\n", $conf) as $line) {
             $line = trim($line);
             foreach (array_keys($params) as $k) {
@@ -504,6 +543,13 @@ class QrUtil
             'psk_key' => (string) ($psk ?? ''),
             'server_pub_key' => (string) ($pubKeyServer ?? ''),
         ];
+        if ($protocolSlug === 'awg31') {
+            foreach (Awg31Parameters::fields() as $field) {
+                if (array_key_exists($field, $params) && $params[$field] !== null && $params[$field] !== '') {
+                    $lastConfigObj[$field] = (string) $params[$field];
+                }
+            }
+        }
 
         $serverDesc = self::resolveServerDescription($endpointHost);
 
@@ -535,7 +581,10 @@ class QrUtil
                         'S4' => (string) ($params['S4'] ?? ''),
                         'protocol_version' => '2',
                         'subnet_address' => (string) ($address ? (preg_match('/^(\d+\.\d+\.\d+)\.\d+/', $address, $m) ? $m[1] . '.0' : '10.8.1.0') : '10.8.1.0'),
-                    ] : []),
+                    ] : ($protocolSlug === 'awg31' ? array_merge(
+                        array_filter(array_map(static fn($v) => $v === null ? null : (string) $v, $params), static fn($v) => $v !== null),
+                        ['protocol_version' => '3.1']
+                    ) : [])),
                     'container' => $protocolSlug === 'awg2' ? 'amnezia-awg2' : 'amnezia-awg',
                 ],
             ],
@@ -545,6 +594,20 @@ class QrUtil
             'dns2' => $dns2,
             'hostName' => $endpointHost,
         ];
+        if ($protocolSlug === 'awg31') {
+            foreach (Awg31Parameters::fields() as $field) {
+                if (($envelope['containers'][0]['awg'][$field] ?? null) === '') {
+                    unset($envelope['containers'][0]['awg'][$field]);
+                }
+                if (($lastConfigObj[$field] ?? null) === '') {
+                    unset($lastConfigObj[$field]);
+                }
+            }
+            $envelope['containers'][0]['awg']['last_config'] = json_encode(
+                $lastConfigObj,
+                JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT
+            );
+        }
         return $envelope;
     }
 

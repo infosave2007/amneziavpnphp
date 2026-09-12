@@ -65,12 +65,12 @@ done
 # 手动迁移模式（仅用于现有安装/更新）
 set -a; source .env; set +a
 for f in migrations/*.sql; do
-  docker compose exec -T db mysql -u"$DB_USERNAME" -p"$DB_PASSWORD" "$DB_DATABASE" < "$f" || true
+  docker compose exec -T db mysql --default-character-set=utf8mb4 -u"$DB_USERNAME" -p"$DB_PASSWORD" "$DB_DATABASE" < "$f" || true
 done
 
 # 对于 Docker Compose V1 手动迁移模式：
 # for f in migrations/*.sql; do
-#   docker-compose exec -T db mysql -u"$DB_USERNAME" -p"$DB_PASSWORD" "$DB_DATABASE" < "$f" || true
+#   docker-compose exec -T db mysql --default-character-set=utf8mb4 -u"$DB_USERNAME" -p"$DB_PASSWORD" "$DB_DATABASE" < "$f" || true
 # done
 ```
 

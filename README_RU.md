@@ -65,12 +65,12 @@ done
 # Ручной режим миграции (для существующих установок / обновлений)
 set -a; source .env; set +a
 for f in migrations/*.sql; do
-  docker compose exec -T db mysql -u"$DB_USERNAME" -p"$DB_PASSWORD" "$DB_DATABASE" < "$f" || true
+  docker compose exec -T db mysql --default-character-set=utf8mb4 -u"$DB_USERNAME" -p"$DB_PASSWORD" "$DB_DATABASE" < "$f" || true
 done
 
 # Для Docker Compose V1 ручной режим миграции:
 # for f in migrations/*.sql; do
-#   docker-compose exec -T db mysql -u"$DB_USERNAME" -p"$DB_PASSWORD" "$DB_DATABASE" < "$f" || true
+#   docker-compose exec -T db mysql --default-character-set=utf8mb4 -u"$DB_USERNAME" -p"$DB_PASSWORD" "$DB_DATABASE" < "$f" || true
 # done
 ```
 
