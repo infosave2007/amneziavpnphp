@@ -28,12 +28,12 @@ To manually run migrations in an existing database:
 
 ```bash
 # Single migration
-docker compose exec db mysql -uroot -prootpassword amnezia_panel < migrations/001_init.sql
+docker compose exec db mysql --default-character-set=utf8mb4 -uroot -prootpassword amnezia_panel < migrations/001_init.sql
 
 # All migrations in order
 for file in migrations/*.sql; do
   echo "Executing $file..."
-  docker compose exec -T db mysql -uroot -prootpassword amnezia_panel < "$file"
+  docker compose exec -T db mysql --default-character-set=utf8mb4 -uroot -prootpassword amnezia_panel < "$file"
 done
 ```
 
@@ -43,8 +43,7 @@ To regenerate translation migrations from the current database:
 
 ```bash
 # Export translations for a specific language
-docker compose exec -T db mysql -uroot -prootpassword amnezia_panel \
-  --default-character-set=utf8mb4 \
+docker compose exec -T db mysql --default-character-set=utf8mb4 -uroot -prootpassword amnezia_panel \
   -e "SELECT CONCAT('(''', language_code, ''', ''', translation_key, ''', ''', 
       REPLACE(translation_value, '''', ''''''), '''),') 
       FROM translations WHERE language_code = 'ru' ORDER BY translation_key;" \

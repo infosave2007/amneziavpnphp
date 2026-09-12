@@ -79,3 +79,23 @@ Run `scripts/awg31_regression/run.sh` for the SQLite/mocked-transport maintained
 | `DisableCookies` | `on` | `on`/`off` (boolean spellings normalize) |
 
 When `HeaderProtectionKey` is present, `S1` through `S4` must each be at least 12. Scalar settings reject CR/LF. Fresh installation validates defaults plus overrides before SSH effects. Import and regeneration preserve absence because older clients and native backups may not carry the nine fields. Native Amnezia app import remains unverified unless that application is actually run; the schema, QR decode, and userspace traffic tests are separate evidence.
+
+## QR imports
+
+The client page exposes two camera formats for AWG 2 and AWG 3.1. **Native AWG configuration** is a plain WireGuard-style config QR, matching Amnezia's native AWG export. **Full Amnezia connection** is the compressed native connection envelope split into numbered QR parts at the upstream 850-byte boundary. Scan every numbered part in order. The separately displayed `vpn://` value is for copy and paste; its scheme is intentionally not encoded into the camera QR parts.
+
+QR images are generated from the current stored config when the page or API export is read. This corrects QR output for clients created by older panel versions without rotating keys, changing the peer, or regenerating the VPN config. The `/api/clients/{id}/qr` and details responses include `vpn_qr_codes` as an ordered array and retain `vpn_url` as text.
+
+Run the self-contained QR framing test and the broader AWG 3.1 contract checks after changing exports:
+
+```bash
+php scripts/qr_import_contract_test.php
+php scripts/awg31_contract_test.php
+```
+
+Translation migration source checks run without a database. The integration test creates and removes a uniquely named disposable schema and requires a protected MySQL client option file with create/drop privileges:
+
+```bash
+scripts/encoding_migration_contract_test.sh
+MYSQL_DEFAULTS_FILE=/path/to/mode-600-client.cnf scripts/encoding_mysql_integration_test.sh
+```

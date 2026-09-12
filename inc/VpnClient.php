@@ -1555,6 +1555,10 @@ class VpnClient
         require_once __DIR__ . '/QrUtil.php';
 
         try {
+            if (in_array($protocolSlug, ['awg2', 'awg31'], true)) {
+                return QrUtil::pngBase64($config, 800, 32, 'Native AWG configuration');
+            }
+
             // Check for X-Ray VLESS
             if (strpos($config, 'vless://') === 0) {
                 // Parse VLESS URI
@@ -1597,26 +1601,30 @@ class VpnClient
     }
 
     /**
-     * Generate second QR code in vpn:// URL format
-     * Used for newer Amnezia app versions that support vpn:// scheme
+     * Generate camera-importable native Amnezia QR parts.
+     *
+     * @return list<string> image data URIs in required scan order
      */
-    public static function generateQRCodeVpnUrl(string $config, string $protocolSlug = ''): string
+    public static function generateQRCodeVpnParts(string $config, string $protocolSlug = ''): array
     {
         require_once __DIR__ . '/QrUtil.php';
 
         try {
-            // For X-Ray VLESS, use same format as regular QR
             if (strpos($config, 'vless://') === 0) {
-                return self::generateQRCode($config, $protocolSlug);
+                $single = self::generateQRCode($config, $protocolSlug);
+                return $single === '' ? [] : [$single];
             }
 
-            // For AWG2 and other WireGuard/AWG, use vpn:// URL format with JSON + zlib
-            $payloadVpn = 'vpn://' . QrUtil::encodeVpnUrlConf($config, $protocolSlug);
-            $dataUri = QrUtil::pngBase64($payloadVpn);
-            return $dataUri;
+            $images = [];
+            foreach (QrUtil::encodeVpnQrChunks($config, $protocolSlug) as $payload) {
+                // Large source pixels and a real quiet zone remain camera-readable
+                // when the responsive page scales the image down.
+                $images[] = QrUtil::pngBase64($payload, 800, 32, 'Amnezia connection');
+            }
+            return $images;
         } catch (Throwable $e) {
-            error_log('Failed to generate vpn:// QR code: ' . $e->getMessage());
-            return '';
+            error_log('Failed to generate native Amnezia QR codes: ' . $e->getMessage());
+            return [];
         }
     }
 

@@ -11,3 +11,5 @@ logs
 !apache.conf
 private
 TASK.md
+
+._*

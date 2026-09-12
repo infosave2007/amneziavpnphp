@@ -6,7 +6,7 @@ require __DIR__ . '/../../inc/BackupLibrary.php';
 final class QrUtil
 {
     public static function encodeOldPayloadFromConf(string $config, string $slug): string { return 'mock-old-' . $slug; }
-    public static function pngBase64(string $payload): string { return 'mock-qr:' . $payload; }
+    public static function pngBase64(string $payload, int $size = 300, int $margin = 1, string $label = ''): string { return 'mock-qr:' . hash('sha256', $payload); }
 }
 
 loadCapturedClass(__DIR__ . '/../../inc/VpnServer.php');
@@ -67,7 +67,7 @@ check(isset($bySlug['amnezia-wg']) && (int)$bySlug['amnezia-wg']['protocol_id'] 
 check(!in_array(41, array_map(fn($r) => (int)$r['protocol_id'], $bindings), true), 'source numeric protocol id 41 is ignored');
 check((int)$client['protocol_id'] === 909, 'client maps protocol_slug to destination id');
 check($client['config'] === $rawConfig, 'raw client config preserved byte-for-byte');
-check($client['qr_code'] === 'mock-qr:mock-old-awg31', 'secondary client QR uses restored client protocol slug');
+check($client['qr_code'] === 'mock-qr:' . hash('sha256', $rawConfig), 'secondary client QR encodes restored raw config');
 check(json_decode($bySlug['awg31']['config_data'], true) === $secondary, 'complete secondary config/settings/provenance preserved');
 check($server['container_name'] === 'primary-container' && $server['vpn_port'] == 41111 && $server['awg_params'] === json_encode(['primary'=>'sentinel']), 'unrelated primary row preserved');
 check(json_decode($bySlug['amnezia-wg']['config_data'], true)['extras']['primary_blob'] === 'unchanged', 'unrelated primary binding preserved');

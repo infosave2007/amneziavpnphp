@@ -87,6 +87,12 @@ $builtWithoutOptional = VpnClient::buildClientConfig(
 );
 $assert(!str_contains($builtWithoutOptional, 'ContentPaddingAddition ='), 'omitted padding stays omitted');
 $assert(!preg_match('/^I2\s*=/m', $builtWithoutOptional), 'empty I2 stays omitted');
+$assert(QrUtil::encodeOldPayloadFromConf($built, 'awg31') === $built, 'AWG camera QR uses plain config');
+$cameraParts = QrUtil::encodeVpnQrChunks($built, 'awg31');
+$cameraFrame = base64_decode(strtr($cameraParts[0], '-_', '+/') . str_repeat('=', (4 - strlen($cameraParts[0]) % 4) % 4), true);
+$cameraHeader = unpack('nmagic/Ccount/Cid/Nlength', substr($cameraFrame, 0, 8));
+$assert($cameraHeader['magic'] === 0x07C0 && $cameraHeader['count'] === count($cameraParts) && $cameraHeader['id'] === 0, 'native QR QDataStream framing');
+$assert($cameraHeader['length'] === strlen(substr($cameraFrame, 8)), 'native QR QByteArray length');
 $assert(str_starts_with(QrUtil::encodeVpnUrlPayload($built, 'awg31'), 'vpn://'), 'vpn payload has scheme');
 
 $nativeBase = [
@@ -124,7 +130,6 @@ $assert(!preg_match('/UPDATE\s+vpn_servers/i', $migration), 'migration leaves se
 $assert(str_contains($migration, '/opt/amnezia/awg31:/opt/amnezia/awg:rw') || str_contains($migration, '$ROOT:/opt/amnezia/awg:rw'), 'mount contract');
 
 $awg2 = file_get_contents(__DIR__ . '/../migrations/064_complete_awg2_original_params.sql');
-$baseAwg2 = shell_exec('git show 185c062:migrations/064_complete_awg2_original_params.sql');
-$assert(is_string($baseAwg2) && hash_equals(hash('sha256', $baseAwg2), hash('sha256', $awg2)), 'AWG2 migration byte identity');
+$assert(hash_equals('5a2f29fc2f55168f25384171770be48f65aabc0c647a4dfcfe77040a1fb1f4b0', hash('sha256', $awg2)), 'AWG2 migration byte identity');
 
 printf("PASS awg31_contract checks=%d\n", $checks);

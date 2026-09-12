@@ -77,10 +77,11 @@ class QrUtil
 
     public static function encodeOldPayloadFromConf(string $confText, string $protocolSlug = ''): string
     {
-        // For AWG2, use simple format: header + plain config text (like real Amnezia app)
-        // For other protocols, use the old JSON+compression format for backward compatibility
+        // The Amnezia camera importer accepts native AWG configs as plain QR text.
+        // Framing a single config as a partial multipart payload makes the app wait
+        // forever for a chunk that is not displayed.
         if (in_array($protocolSlug, ['awg2', 'awg31'], true)) {
-            return self::encodeSimpleConf($confText);
+            return $confText;
         }
         
         // Old format for backward compatibility with regular AWG
@@ -104,18 +105,10 @@ class QrUtil
         return 'vpn://' . self::encodeOldPayloadFromJson($jsonPayload);
     }
 
-    /**
-     * Encode config in simple format used by real Amnezia app for AWG2:
-     * Header (8 bytes): version (4) + length (4) + config text
-     * No compression, no JSON wrapper
-     */
+    /** Return a native AWG config for a plain, single QR image. */
     public static function encodeSimpleConf(string $confText): string
     {
-        $version = 0x07C00200; // Amnezia magic version number (updated for newer app compatibility)
-        $length = strlen($confText);
-        
-        $header = pack('N2', $version, $length);
-        return self::urlsafe_b64_encode($header . $confText);
+        return $confText;
     }
 
     /**
@@ -145,14 +138,42 @@ class QrUtil
             throw new RuntimeException('gzcompress failed');
         }
         
-        // Header: uint32 BE with uncompressed length
-        $header = pack('N', $uncompressedLength);
-        
-        // Payload: header + compressed data
-        $payload = $header . $compressed;
-        
-        // Base64url encode without padding
-        return self::urlsafe_b64_encode($payload);
+        return self::urlsafe_b64_encode(pack('N', $uncompressedLength) . $compressed);
+    }
+
+    /**
+     * Encode the native Amnezia connection as camera-importable multipart QR
+     * payloads. This mirrors QDataStream(qint16 magic, quint8 count, quint8 id,
+     * QByteArray chunk) used by the Amnezia client. The copyable vpn:// value
+     * remains a separate text format and must not be placed in these QR images.
+     *
+     * @return list<string> Base64url QR payloads in scan order
+     */
+    public static function encodeVpnQrChunks(string $confText, string $protocolSlug = '', int $maxChunkBytes = 850): array
+    {
+        if ($maxChunkBytes < 1) {
+            throw new InvalidArgumentException('QR chunk size must be positive');
+        }
+
+        $encoded = self::encodeVpnUrlConf($confText, $protocolSlug);
+        $padding = (4 - strlen($encoded) % 4) % 4;
+        $compressed = base64_decode(strtr($encoded, '-_', '+/') . str_repeat('=', $padding), true);
+        if ($compressed === false) {
+            throw new RuntimeException('Failed to decode compressed VPN payload');
+        }
+
+        $chunks = str_split($compressed, $maxChunkBytes);
+        $count = count($chunks);
+        if ($count === 0 || $count > 255) {
+            throw new RuntimeException('VPN payload has unsupported QR chunk count');
+        }
+
+        $result = [];
+        foreach ($chunks as $id => $chunk) {
+            $frame = pack('nCCN', 0x07C0, $count, $id, strlen($chunk)) . $chunk;
+            $result[] = self::urlsafe_b64_encode($frame);
+        }
+        return $result;
     }
 
     /**

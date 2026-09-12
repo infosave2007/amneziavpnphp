@@ -66,12 +66,12 @@ done
 # Manual migration mode (existing installations / updates only)
 set -a; source .env; set +a
 for f in migrations/*.sql; do
-  docker compose exec -T db mysql -u"$DB_USERNAME" -p"$DB_PASSWORD" "$DB_DATABASE" < "$f" || true
+  docker compose exec -T db mysql --default-character-set=utf8mb4 -u"$DB_USERNAME" -p"$DB_PASSWORD" "$DB_DATABASE" < "$f" || true
 done
 
 # For Docker Compose V1 manual migration mode:
 # for f in migrations/*.sql; do
-#   docker-compose exec -T db mysql -u"$DB_USERNAME" -p"$DB_PASSWORD" "$DB_DATABASE" < "$f" || true
+#   docker-compose exec -T db mysql --default-character-set=utf8mb4 -u"$DB_USERNAME" -p"$DB_PASSWORD" "$DB_DATABASE" < "$f" || true
 # done
 ```
 

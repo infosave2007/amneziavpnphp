@@ -146,17 +146,24 @@
   
   {% if client.qr_code %}
   <div class="bg-white rounded shadow p-6 text-center">
-    <h3 class="font-bold mb-4">QR Code (Simple)</h3>
-    <img src="{{ client.qr_code }}" alt="QR Code" class="mx-auto" style="max-width: 300px; width: 100%; height: auto;">
-    <p class="text-sm text-gray-600 mt-2">Scan with Amnezia VPN app</p>
+    <h3 class="font-bold mb-4">{% if is_awg_family_export %}Native AWG configuration{% else %}QR Code{% endif %}</h3>
+    <img src="{{ client.qr_code }}" alt="{% if is_awg_family_export %}Native AWG configuration{% else %}Client configuration{% endif %} QR code" class="mx-auto" style="width: 100%; max-width: 500px; max-height: 70vh; height: auto; object-fit: contain; image-rendering: pixelated;">
+    <p class="text-sm text-gray-600 mt-2">Scan this QR code with the Amnezia VPN app</p>
+    <a href="{{ client.qr_code }}" download="client-config-qr.png" class="inline-block text-sm text-purple-600 mt-2">Download full-size QR</a>
   </div>
   {% endif %}
 
-  {% if is_awg_family_export and qr_code_vpn_url %}
+  {% if is_awg_family_export and qr_code_vpn_parts %}
   <div class="bg-white rounded shadow p-6 text-center mt-6">
-    <h3 class="font-bold mb-4">QR Code (vpn:// URL)</h3>
-    <img src="{{ qr_code_vpn_url }}" alt="QR Code VPN URL" class="mx-auto" style="max-width: 300px; width: 100%; height: auto;">
-    <p class="text-sm text-gray-600 mt-2">Scan with Amnezia VPN app</p>
+    <h3 class="font-bold mb-4">Full Amnezia connection</h3>
+    <p class="text-sm text-gray-600 mb-4">Scan every part in order with the Amnezia VPN app.</p>
+    {% for qr_part in qr_code_vpn_parts %}
+      <div class="mb-6">
+        <p class="font-medium mb-2">Part {{ loop.index }} of {{ loop.length }}</p>
+        <img src="{{ qr_part }}" alt="Amnezia connection QR part {{ loop.index }} of {{ loop.length }}" class="mx-auto" style="width: 100%; max-width: 500px; max-height: 70vh; height: auto; object-fit: contain; image-rendering: pixelated;">
+        <a href="{{ qr_part }}" download="amnezia-connection-part-{{ loop.index }}.png" class="inline-block text-sm text-purple-600 mt-2">Download full-size part</a>
+      </div>
+    {% endfor %}
   </div>
   {% endif %}
 

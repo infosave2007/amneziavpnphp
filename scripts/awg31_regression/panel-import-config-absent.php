@@ -21,7 +21,11 @@ final class QrUtil
         self::$calls[] = ['config' => $config, 'slug' => $slug];
         return 'mock-old-' . $slug . ':' . hash('sha256', $config);
     }
-    public static function pngBase64(string $payload): string { return 'mock-qr:' . $payload; }
+    public static function pngBase64(string $payload, int $size = 300, int $margin = 1, string $label = ''): string
+    {
+        self::$calls[] = ['config' => $payload, 'size' => $size, 'margin' => $margin];
+        return 'mock-qr:' . hash('sha256', $payload);
+    }
 }
 
 $serverSource = file_get_contents(__DIR__ . '/../../inc/VpnServer.php');
@@ -114,8 +118,8 @@ foreach ($selectedParams as $field => $value) {
     check(str_contains($config, $field . ' = ' . $value), 'generated config preserves selected parameter ' . $field);
 }
 check(!str_contains($config, 'ContentPaddingAddition'), 'optional absent in selected binding stays absent despite primary value');
-check(count(QrUtil::$calls) === 1 && QrUtil::$calls[0]['slug'] === 'awg31' && QrUtil::$calls[0]['config'] === $config, 'QR uses generated config and secondary AWG31 slug');
-check(str_starts_with((string) $client['qr_code'], 'mock-qr:mock-old-awg31:'), 'stored QR is generated for AWG31');
+check(count(QrUtil::$calls) === 1 && QrUtil::$calls[0]['config'] === $config, 'QR uses exact generated raw AWG config');
+check($client['qr_code'] === 'mock-qr:' . hash('sha256', $config), 'stored QR is generated from raw AWG config');
 check(json_decode($bySlug['awg31']['config_data'], true) === $selectedBinding, 'complete selected binding remains structurally equal');
 check(VpnServer::$commands === [], 'documented local import path emits no remote command');
 

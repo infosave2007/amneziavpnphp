@@ -1220,7 +1220,7 @@ Router::get('/clients/{id}', function ($params) {
         $server = new VpnServer((int) $clientData['server_id']);
         $serverData = $server->getData();
         $protocolOutput = '';
-        $qrCodeVpnUrl = '';
+        $qrCodeVpnParts = [];
         $vpnUrlConfig = '';
         $isAwg2 = false;
         $isAwg31 = false;
@@ -1256,16 +1256,21 @@ Router::get('/clients/{id}', function ($params) {
                 }
             }
             
-            // Generate second QR code and vpn:// config for AWG2
+            // Generate current QR images from the stored config. This repairs old
+            // clients whose database QR used an incomplete multipart header,
+            // without changing their keys, peer, status, or config.
             if (($isAwg2 || $isAwg31) && !empty($clientData['config'])) {
                 try {
-                    $qrCodeVpnUrl = VpnClient::generateQRCodeVpnUrl($clientData['config'], $protocolSlug);
-                    
-                    // Generate vpn:// URL string using vpn:// format (JSON + zlib)
+                    $clientData['qr_code'] = VpnClient::generateQRCode($clientData['config'], $protocolSlug);
+                    $qrCodeVpnParts = VpnClient::generateQRCodeVpnParts($clientData['config'], $protocolSlug);
+
+                    // The vpn:// value is the copy/paste format. Camera QR parts
+                    // use QDataStream framing and intentionally omit this scheme.
                     require_once __DIR__ . '/../inc/QrUtil.php';
                     $vpnUrlConfig = 'vpn://' . QrUtil::encodeVpnUrlConf($clientData['config'], $protocolSlug);
                 } catch (Exception $e) {
-                    // Ignore errors, just don't show the second QR
+                    $clientData['qr_code'] = '';
+                    $qrCodeVpnParts = [];
                 }
             }
         } catch (Exception $e) {
@@ -1274,7 +1279,7 @@ Router::get('/clients/{id}', function ($params) {
         View::render('clients/view.twig', [
             'client' => $clientData,
             'protocol_output' => $protocolOutput,
-            'qr_code_vpn_url' => $qrCodeVpnUrl,
+            'qr_code_vpn_parts' => $qrCodeVpnParts,
             'vpn_url_config' => $vpnUrlConfig,
             'is_awg2' => $isAwg2,
             'is_awg31' => $isAwg31,
@@ -2299,9 +2304,16 @@ Router::get('/api/clients/{id}/details', function ($params) {
             $stmtProtocol->execute([(int) $clientData['protocol_id']]);
             $clientProtocolSlug = (string) $stmtProtocol->fetchColumn();
         }
-        $vpnUrl = in_array($clientProtocolSlug, ['awg2', 'awg31'], true)
+        $isAwgFamily = in_array($clientProtocolSlug, ['awg2', 'awg31'], true);
+        $vpnUrl = $isAwgFamily
             ? 'vpn://' . QrUtil::encodeVpnUrlConf((string) $clientData['config'], $clientProtocolSlug)
             : null;
+        $currentQrCode = $isAwgFamily
+            ? VpnClient::generateQRCode((string) $clientData['config'], $clientProtocolSlug)
+            : $clientData['qr_code'];
+        $vpnQrCodes = $isAwgFamily
+            ? VpnClient::generateQRCodeVpnParts((string) $clientData['config'], $clientProtocolSlug)
+            : [];
 
         echo json_encode([
             'success' => true,
@@ -2317,7 +2329,8 @@ Router::get('/api/clients/{id}/details', function ($params) {
                 'bytes_received' => $clientData['bytes_received'],
                 'last_handshake' => $clientData['last_handshake'],
                 'config' => $clientData['config'],
-                'qr_code' => $clientData['qr_code'],
+                'qr_code' => $currentQrCode,
+                'vpn_qr_codes' => $vpnQrCodes,
                 'protocol_id' => $clientData['protocol_id'],
                 'protocol_slug' => $clientProtocolSlug,
                 'vpn_url' => $vpnUrl,
@@ -2356,12 +2369,18 @@ Router::get('/api/clients/{id}/qr', function ($params) {
             $stmtProtocol->execute([(int) $clientData['protocol_id']]);
             $protocolSlug = (string) $stmtProtocol->fetchColumn();
         }
+        $isAwgFamily = in_array($protocolSlug, ['awg2', 'awg31'], true);
         echo json_encode([
             'success' => true,
-            'qr_code' => $clientData['qr_code'],
+            'qr_code' => $isAwgFamily
+                ? VpnClient::generateQRCode((string) $clientData['config'], $protocolSlug)
+                : $clientData['qr_code'],
+            'vpn_qr_codes' => $isAwgFamily
+                ? VpnClient::generateQRCodeVpnParts((string) $clientData['config'], $protocolSlug)
+                : [],
             'client_name' => $clientData['name'],
             'protocol_id' => $clientData['protocol_id'],
-            'vpn_url' => in_array($protocolSlug, ['awg2', 'awg31'], true) ? 'vpn://' . QrUtil::encodeVpnUrlConf((string) $clientData['config'], $protocolSlug) : null,
+            'vpn_url' => $isAwgFamily ? 'vpn://' . QrUtil::encodeVpnUrlConf((string) $clientData['config'], $protocolSlug) : null,
         ]);
     } catch (Exception $e) {
         http_response_code(404);
