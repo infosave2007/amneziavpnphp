@@ -32,6 +32,32 @@ an imported native runtime because the panel does not own it; remove that
 runtime through the native installation workflow. Fresh panel-owned AWG31
 uninstall removes only `amnezia-awg31`, its image and `/opt/amnezia/awg31`.
 
+## Migrating an existing AWG or AWG2 installation
+
+Migration is an explicit parallel cutover. Keep the old container and a
+protected copy of its configuration while installing `awg31` into its separate
+container and directory. If an HTTP install request was interrupted, first
+check that no original request, remote build, or install process is still
+running. Reuse the existing server row and call its protocol-install API again;
+do not create a duplicate server or select the generic **Restore** action for a
+panel-owned AWG 3.1 userspace installation. The pinned installer is idempotent
+for a complete `/opt/amnezia/awg31` state and reports incomplete source, config,
+or key sets as errors that must be reconciled before retrying.
+
+Preserve client identities only when their complete configurations, including
+client private keys, are available. Native server metadata commonly contains
+only peer public keys and PSKs. In that case create new clients through the
+maintained API, record a stable old-to-new name mapping, assign unique target
+addresses, and deliver the newly exported configurations. Disambiguate
+duplicate names without merging or dropping peers. Verify every exported
+public key, PSK, and address against the live AWG 3.1 peer, test tunnel DNS,
+HTTPS, and egress, and restart-test the new container before stopping the old
+container. Retain the stopped old container and protected backup until the
+operator accepts the new configurations; rollback means stopping AWG 3.1 and
+starting the preserved old container and restoring its recorded original
+restart policy. This procedure does not claim automatic in-place client
+migration.
+
 The lifecycle runner takes its endpoint, token file, server ID, protocol ID and
 private output directory from environment variables. It installs AWG 3.1,
 creates four clients, exercises details, QR, regeneration, revoke, restore,

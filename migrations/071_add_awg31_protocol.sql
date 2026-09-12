@@ -112,7 +112,8 @@ sleep 2
 docker exec "$CONTAINER_NAME" awg show awg0 >/dev/null
 docker exec "$CONTAINER_NAME" pgrep -x amneziawg-go >/dev/null
 docker top "$CONTAINER_NAME" -eo pid,comm,args | grep -F "amneziawg-go -f awg0" >/dev/null
-IMAGE_ID=$(docker image inspect "$IMAGE_NAME" --format "{{.Id}}")
+IMAGE_ID=$(docker image inspect "$IMAGE_NAME" | grep -m1 "\\\"Id\\\":" | cut -d "\\\"" -f4)
+printf "%s" "$IMAGE_ID" | grep -Eq "^sha256:[0-9a-f]{64}$" || { echo "Invalid AWG31 image identity" >&2; exit 45; }
 ENGINE_BINARY_SHA=$(docker exec "$CONTAINER_NAME" sha256sum /usr/bin/amneziawg-go | cut -c1-64)
 TOOLS_BINARY_SHA=$(docker exec "$CONTAINER_NAME" sha256sum /usr/bin/awg | cut -c1-64)
 printf "Success: true\nPort: %s\nContainer Name: %s\nRuntime Commit: %s\nTools Commit: %s\nImage ID: %s\nDockerfile SHA: %s\nEngine Binary SHA: %s\nTools Binary SHA: %s\n" "$VPN_PORT" "$CONTAINER_NAME" "$ENGINE_COMMIT" "$TOOLS_COMMIT" "$IMAGE_ID" "$DOCKERFILE_SHA" "$ENGINE_BINARY_SHA" "$TOOLS_BINARY_SHA"

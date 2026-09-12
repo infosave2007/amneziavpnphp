@@ -3,6 +3,7 @@ require_once __DIR__ . '/../inc/Awg31Parameters.php';
 require_once __DIR__ . '/../inc/QrUtil.php';
 require_once __DIR__ . '/../inc/VpnClient.php';
 require_once __DIR__ . '/../inc/BackupLibrary.php';
+require_once __DIR__ . '/../inc/InstallProtocolManager.php';
 
 $checks = 0;
 $assert = static function (bool $ok, string $message) use (&$checks): void {
@@ -126,6 +127,41 @@ $assert(str_contains($migration, 'b5928efb6ca19f0153958460c3d141f04abc5c2e'), 'e
 $assert(str_contains($migration, 'ee0f0a9aa34ff0a0da4b3433b9512781cfe02843'), 'tools pin');
 $assert(str_contains($migration, 'ARG AWGTOOLS_COMMIT=$TOOLS_COMMIT'), 'tools checkout injected by immutable sha');
 $assert(str_contains($migration, 'amneziawg-go -f awg0'), 'userspace engine supervised in foreground');
+$assert(!str_contains($migration, '{{.Id}}') && str_contains($migration, 'IMAGE_ID=$(docker image inspect'), 'image provenance survives panel template rendering');
+$assert(str_contains($migration, 'Invalid AWG31 image identity') && str_contains($migration, '^sha256:[0-9a-f]{64}$'), 'image provenance format is validated');
+$assert((bool) preg_match('/^IMAGE_ID=.*\n.*Invalid AWG31 image identity.*$/m', $migration, $imageSnippet), 'image provenance snippet extracted');
+$storedImageSnippet = stripcslashes($imageSnippet[0]); // MySQL decodes backslash escapes in the SQL string literal.
+$assert(str_contains($storedImageSnippet, 'grep -m1 "\\"Id\\":"') && str_contains($storedImageSnippet, 'cut -d "\\"" -f4'), 'MySQL-decoded image command retains shell quoting');
+$renderTemplate = new ReflectionMethod(InstallProtocolManager::class, 'renderTemplate');
+$renderTemplate->setAccessible(true);
+$renderedImageSnippet = $renderTemplate->invoke(null, $storedImageSnippet, []);
+$assert($renderedImageSnippet === $storedImageSnippet && !str_contains($renderedImageSnippet, '{{'), 'actual maintained renderer preserves stored image provenance command and validation');
+$syntaxFile = tempnam(sys_get_temp_dir(), 'awg31-image-command-');
+file_put_contents($syntaxFile, "#!/bin/bash\n" . $renderedImageSnippet . "\n");
+exec('bash -n ' . escapeshellarg($syntaxFile), $syntaxOutput, $syntaxStatus);
+@unlink($syntaxFile);
+$assert($syntaxStatus === 0, 'MySQL-decoded and rendered image provenance command has valid shell syntax');
+$mockDir = sys_get_temp_dir() . '/awg31-docker-' . bin2hex(random_bytes(6));
+mkdir($mockDir, 0700, true);
+$mockDocker = $mockDir . '/docker';
+$runImageSnippet = static function (string $dockerJson) use ($mockDir, $mockDocker, $renderedImageSnippet): array {
+    file_put_contents($mockDocker, "#!/bin/sh\nprintf '%s\\n' " . escapeshellarg($dockerJson) . "\n");
+    chmod($mockDocker, 0700);
+    $script = $mockDir . '/run.sh';
+    file_put_contents($script, "#!/bin/bash\nset -e\nIMAGE_NAME=amnezia-awg31\n" . $renderedImageSnippet . "\nprintf '%s' \"\$IMAGE_ID\"\n");
+    chmod($script, 0700);
+    $output = [];
+    exec('PATH=' . escapeshellarg($mockDir . ':' . getenv('PATH')) . ' bash ' . escapeshellarg($script) . ' 2>/dev/null', $output, $status);
+    return [$status, implode("\n", $output)];
+};
+$expectedImageId = 'sha256:' . str_repeat('a', 64);
+[$validImageStatus, $validImageOutput] = $runImageSnippet('[{"Id":"' . $expectedImageId . '"}]');
+$assert($validImageStatus === 0 && $validImageOutput === $expectedImageId, 'stored image command extracts and accepts a Docker sha256 identity');
+[$invalidImageStatus] = $runImageSnippet('[{"Id":"["}]');
+$assert($invalidImageStatus === 45, 'stored image command rejects a malformed Docker identity');
+@unlink($mockDir . '/run.sh');
+@unlink($mockDocker);
+@rmdir($mockDir);
 $assert(!preg_match('/UPDATE\s+vpn_servers/i', $migration), 'migration leaves server rows untouched');
 $assert(str_contains($migration, '/opt/amnezia/awg31:/opt/amnezia/awg:rw') || str_contains($migration, '$ROOT:/opt/amnezia/awg:rw'), 'mount contract');
 
