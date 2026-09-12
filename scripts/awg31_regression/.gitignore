@@ -1,0 +1,6 @@
+*.sqlite
+*.backup.json
+!same-server.backup.json
+native-*.backup.json
+panel-*.backup.json
+!panel-config-absent.backup.json

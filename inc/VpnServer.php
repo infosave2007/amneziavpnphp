@@ -248,7 +248,20 @@ class VpnServer
             'active'
         ]);
 
-        return (int) $pdo->lastInsertId();
+        $serverId = (int) $pdo->lastInsertId();
+        foreach (($serverData['server_protocols'] ?? []) as $binding) {
+            $slug = trim((string) ($binding['slug'] ?? ''));
+            if ($slug === '') continue;
+            $find = $pdo->prepare('SELECT id FROM protocols WHERE slug = ? LIMIT 1');
+            $find->execute([$slug]);
+            $protocolId = (int) $find->fetchColumn();
+            if ($protocolId <= 0) continue;
+            $configData = $binding['config_data'] ?? null;
+            if (is_array($configData)) $configData = json_encode($configData, JSON_UNESCAPED_SLASHES);
+            $insert = $pdo->prepare('INSERT INTO server_protocols (server_id, protocol_id, config_data, applied_at, created_at) VALUES (?, ?, ?, NOW(), NOW()) ON DUPLICATE KEY UPDATE config_data = VALUES(config_data), applied_at = NOW()');
+            $insert->execute([$serverId, $protocolId, $configData]);
+        }
+        return $serverId;
     }
 
     /**
@@ -474,6 +487,7 @@ class VpnServer
         $sshOptions = '-o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o ConnectTimeout=10';
         $credentials = '';
         $keyFile = '';
+        $passwordFile = '';
 
         $target = Ssh::target((string) $this->data['username'], (string) $this->data['host']);
         $port = Ssh::port($this->data['port']);
@@ -491,10 +505,13 @@ class VpnServer
                 $target
             );
         } else {
+            $passwordFile = tempnam(sys_get_temp_dir(), 'sshpass-');
+            file_put_contents($passwordFile, (string) $this->data['password']);
+            chmod($passwordFile, 0600);
             $sshOptions .= " -o PreferredAuthentications=password -o PubkeyAuthentication=no";
             $testCommand = sprintf(
-                "sshpass -p %s ssh -p %d %s %s 'echo test' 2>/dev/null",
-                escapeshellarg($this->data['password']),
+                "sshpass -f %s ssh -p %d %s %s 'echo test' 2>/dev/null",
+                escapeshellarg($passwordFile),
                 $port,
                 $sshOptions,
                 $target
@@ -505,6 +522,9 @@ class VpnServer
 
         if ($keyFile && file_exists($keyFile)) {
             unlink($keyFile);
+        }
+        if ($passwordFile && file_exists($passwordFile)) {
+            unlink($passwordFile);
         }
 
         return trim($result) === 'test';
@@ -534,6 +554,7 @@ class VpnServer
         // Determine auth method
         $sshOptions = '-o LogLevel=ERROR -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no';
         $keyFile = '';
+        $passwordFile = '';
 
         $target = Ssh::target((string) $this->data['username'], (string) $this->data['host']);
         $port = Ssh::port($this->data['port']);
@@ -555,6 +576,9 @@ class VpnServer
                 $escapedCommand
             );
         } else {
+            $passwordFile = tempnam(sys_get_temp_dir(), 'sshpass-');
+            file_put_contents($passwordFile, (string) $this->data['password']);
+            chmod($passwordFile, 0600);
             $needsSudo = ($sudo ?? false) && strtolower((string) ($this->data['username'] ?? '')) !== 'root';
             if ($needsSudo) {
                 // Suppress sudo prompt text to keep command output machine-parseable.
@@ -566,8 +590,8 @@ class VpnServer
 
             $sshOptions .= " -o PreferredAuthentications=password -o PubkeyAuthentication=no";
             $sshCommand = sprintf(
-                "sshpass -p %s ssh -p %d %s %s %s 2>&1",
-                escapeshellarg($this->data['password']),
+                "sshpass -f %s ssh -p %d %s %s %s 2>&1",
+                escapeshellarg($passwordFile),
                 $port,
                 $sshOptions,
                 $target,
@@ -591,8 +615,8 @@ class VpnServer
             
             $escapedBaseCommand = escapeshellarg($pathPrefix . $baseCommand);
             $sshCommandNoSudo = sprintf(
-                "sshpass -p %s ssh -p %d %s %s %s 2>&1",
-                escapeshellarg($this->data['password']),
+                "sshpass -f %s ssh -p %d %s %s %s 2>&1",
+                escapeshellarg($passwordFile),
                 $port,
                 $sshOptions,
                 $target,
@@ -603,6 +627,9 @@ class VpnServer
 
         if ($keyFile && file_exists($keyFile)) {
             unlink($keyFile);
+        }
+        if ($passwordFile && file_exists($passwordFile)) {
+            unlink($passwordFile);
         }
 
         return $output;
@@ -628,6 +655,7 @@ class VpnServer
         
         $sshOptions = '-o LogLevel=ERROR -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no';
         $keyFile = '';
+        $passwordFile = '';
 
         $target = Ssh::target((string) $this->data['username'], (string) $this->data['host']);
         $port = Ssh::port($this->data['port']);
@@ -649,14 +677,17 @@ class VpnServer
                 $escapedCommand
             );
         } else {
+            $passwordFile = tempnam(sys_get_temp_dir(), 'sshpass-');
+            file_put_contents($passwordFile, (string) $this->data['password']);
+            chmod($passwordFile, 0600);
             // For password auth, first try without sudo
             $preparedCommand = $pathPrefix . $testCmd;
             $escapedCommand = escapeshellarg($preparedCommand);
 
             $sshOptions .= " -o PreferredAuthentications=password -o PubkeyAuthentication=no";
             $sshCommand = sprintf(
-                "sshpass -p %s ssh -p %d %s %s %s 2>&1",
-                escapeshellarg($this->data['password']),
+                "sshpass -f %s ssh -p %d %s %s %s 2>&1",
+                escapeshellarg($passwordFile),
                 $port,
                 $sshOptions,
                 $target,
@@ -668,6 +699,9 @@ class VpnServer
 
         if ($keyFile && file_exists($keyFile)) {
             unlink($keyFile);
+        }
+        if ($passwordFile && file_exists($passwordFile)) {
+            unlink($passwordFile);
         }
 
         // Check if docker command succeeded (output contains "version")
@@ -1021,13 +1055,19 @@ BASH;
         try {
             // Get all clients for this server
             $stmt = $pdo->prepare('
-                SELECT id, name, client_ip, public_key, private_key, preshared_key, 
-                       config, status, expires_at, created_at
-                FROM vpn_clients 
-                WHERE server_id = ?
+                SELECT c.id, c.name, c.client_ip, c.public_key, c.private_key, c.preshared_key,
+                       c.config, c.status, c.expires_at, c.created_at, c.protocol_id,
+                       p.slug AS protocol_slug
+                FROM vpn_clients c
+                LEFT JOIN protocols p ON p.id = c.protocol_id
+                WHERE c.server_id = ?
             ');
             $stmt->execute([$this->serverId]);
             $clients = $stmt->fetchAll();
+
+            $stmtProtocols = $pdo->prepare('SELECT p.slug, sp.config_data, sp.applied_at FROM server_protocols sp JOIN protocols p ON p.id = sp.protocol_id WHERE sp.server_id = ?');
+            $stmtProtocols->execute([$this->serverId]);
+            $serverProtocols = $stmtProtocols->fetchAll(PDO::FETCH_ASSOC);
 
             // Prepare backup data
             $backupData = [
@@ -1044,6 +1084,7 @@ BASH;
                     'preshared_key' => $this->data['preshared_key'],
                     'awg_params' => $this->data['awg_params'],
                 ],
+                'server_protocols' => $serverProtocols,
                 'clients' => $clients,
                 'backup_date' => date('Y-m-d H:i:s'),
                 'version' => '1.0'
@@ -1179,17 +1220,29 @@ BASH;
                     continue;
                 }
 
+                $slug = trim((string) ($clientData['protocol_slug'] ?? $backupData['server']['install_protocol'] ?? $this->data['install_protocol'] ?? ''));
+                $protocolId = 0;
+                if ($slug !== '') {
+                    $findProtocol = $pdo->prepare('SELECT id FROM protocols WHERE slug = ? LIMIT 1');
+                    $findProtocol->execute([$slug]);
+                    $protocolId = (int) $findProtocol->fetchColumn();
+                }
+                $targetServerData = $protocolId > 0
+                    ? VpnClient::resolveProtocolServerData($this, $protocolId)
+                    : $this->data;
+
                 // Insert client
                 $stmt = $pdo->prepare('
                     INSERT INTO vpn_clients 
-                    (server_id, user_id, name, client_ip, public_key, private_key, preshared_key, 
+                    (server_id, user_id, protocol_id, name, client_ip, public_key, private_key, preshared_key,
                      config, status, expires_at) 
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ');
 
                 $stmt->execute([
                     $this->serverId,
                     $this->data['user_id'],
+                    $protocolId > 0 ? $protocolId : null,
                     $clientData['name'],
                     $clientData['client_ip'],
                     $clientData['public_key'],
@@ -1200,8 +1253,8 @@ BASH;
                     $clientData['expires_at']
                 ]);
 
-                // Add client to server container
-                VpnClient::addClientToServer($this->data, $clientData['public_key'], $clientData['client_ip']);
+                // Backups restore clients disabled for safety, so do not create a live
+                // peer that later delete/revoke would reasonably assume is absent.
 
                 $restored++;
 

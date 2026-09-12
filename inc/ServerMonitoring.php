@@ -348,7 +348,7 @@ class ServerMonitoring
             );
 
             if ($isWireguardClient) {
-                $containerName = $this->resolveContainerForProtocol($protocolSlug);
+                $containerName = $this->resolveContainerForProtocol($protocolSlug, (int) ($client['protocol_id'] ?? 0));
             }
 
             if ($isAivpnClient) {
@@ -416,7 +416,10 @@ class ServerMonitoring
             // $1=interface $2=pubkey $3=psk $4=endpoint $5=allowed-ips $6=latest-handshake $7=rx-bytes $8=tx-bytes $9=keepalive
             // rx-bytes = bytes received by server = client's upload (bytes_sent)
             // tx-bytes = bytes transmitted by server = client's download (bytes_received)
-            $cmd = "docker exec {$containerName} wg show all dump | grep '{$publicKey}' | awk '{print \$6, \$7, \$8}'";
+            $wgTool = in_array($protocolSlug, ['awg2', 'awg31'], true) ? 'awg' : 'wg';
+            $wgInterface = in_array($protocolSlug, ['awg2', 'awg31'], true) ? 'awg0' : 'all';
+            $columns = $wgInterface === 'all' ? '{print $6, $7, $8}' : '{print $5, $6, $7}';
+            $cmd = "docker exec {$containerName} {$wgTool} show {$wgInterface} dump | grep '{$publicKey}' | awk " . escapeshellarg($columns);
             $result = $this->execSSH($cmd);
 
             if ($result) {
@@ -843,7 +846,7 @@ class ServerMonitoring
         return '';
     }
 
-    private function resolveContainerForProtocol(string $protocolSlug): string
+    private function resolveContainerForProtocol(string $protocolSlug, int $protocolId = 0): string
     {
         $default = trim((string) ($this->serverData['container_name'] ?? ''));
         if ($protocolSlug === '') {
@@ -852,6 +855,13 @@ class ServerMonitoring
 
         try {
             $db = DB::conn();
+            if ($protocolId > 0) {
+                $stored = $db->prepare('SELECT config_data FROM server_protocols WHERE server_id = ? AND protocol_id = ? LIMIT 1');
+                $stored->execute([(int) ($this->serverData['id'] ?? 0), $protocolId]);
+                $config = json_decode((string) $stored->fetchColumn(), true) ?: [];
+                $candidate = trim((string) ($config['extras']['container_name'] ?? ''));
+                if ($candidate !== '') return $candidate;
+            }
             $stmt = $db->prepare('SELECT definition FROM protocols WHERE slug = ? LIMIT 1');
             $stmt->execute([$protocolSlug]);
             $definitionJson = $stmt->fetchColumn();
@@ -970,9 +980,12 @@ class ServerMonitoring
         if (strpos($containerName, 'awg') === false && strpos($containerName, 'wireguard') === false) {
             return; // Not an AWG server
         }
+        $slug = (string) ($this->serverData['install_protocol'] ?? '');
+        $wgTool = in_array($slug, ['awg2', 'awg31'], true) ? 'awg' : 'wg';
+        $wgInterface = in_array($slug, ['awg2', 'awg31'], true) ? 'awg0' : 'wg0';
 
         // Get current peer states
-        $cmd = "docker exec $containerName wg show wg0 dump";
+        $cmd = "docker exec $containerName $wgTool show $wgInterface dump";
         $result = $this->execSSH($cmd);
         if (!$result) {
             return;

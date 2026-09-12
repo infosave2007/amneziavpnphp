@@ -1,0 +1,13 @@
+.git
+.work
+.env
+.env.*
+backups
+logs
+*.log
+*.backup
+*.key
+*.conf
+!apache.conf
+private
+TASK.md

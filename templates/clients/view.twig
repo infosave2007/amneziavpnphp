@@ -152,7 +152,7 @@
   </div>
   {% endif %}
 
-  {% if is_awg2 and qr_code_vpn_url %}
+  {% if is_awg_family_export and qr_code_vpn_url %}
   <div class="bg-white rounded shadow p-6 text-center mt-6">
     <h3 class="font-bold mb-4">QR Code (vpn:// URL)</h3>
     <img src="{{ qr_code_vpn_url }}" alt="QR Code VPN URL" class="mx-auto" style="max-width: 300px; width: 100%; height: auto;">
@@ -160,7 +160,7 @@
   </div>
   {% endif %}
 
-  {% if is_awg2 and vpn_url_config %}
+  {% if is_awg_family_export and vpn_url_config %}
   <div class="bg-white rounded shadow p-6 mt-6">
     <h3 class="font-bold mb-4">VPN URL Configuration</h3>
     <div class="bg-gray-100 p-4 rounded text-left overflow-x-auto">

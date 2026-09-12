@@ -1,6 +1,7 @@
 <?php
 require_once __DIR__ . '/Logger.php';
 require_once __DIR__ . '/Ssh.php';
+require_once __DIR__ . '/Awg31Parameters.php';
 
 class InstallProtocolManager
 {
@@ -308,7 +309,9 @@ class InstallProtocolManager
     {
         $engine = self::getEngine($protocol);
         $serverId = $server->getId();
-        if ($engine === 'builtin_awg') {
+        // AWG 3.1 ships a pinned userspace engine and must always use its
+        // protocol script, including when it is the server's primary protocol.
+        if ($engine === 'builtin_awg' && ($protocol['slug'] ?? '') !== 'awg31') {
             try {
                 Logger::appendInstall($serverId, 'Installing builtin AWG...');
                 $result = $server->runAwgInstall($options);
@@ -351,7 +354,8 @@ class InstallProtocolManager
             $awgParams = $result['awg_params'] ?? null;
             if (!is_array($awgParams)) {
                 $flat = [];
-                foreach (['Jc', 'Jmin', 'Jmax', 'S1', 'S2', 'S3', 'S4', 'H1', 'H2', 'H3', 'H4', 'I1', 'I2', 'I3', 'I4', 'I5'] as $k) {
+                $fields = ($protocol['slug'] ?? '') === 'awg31' ? Awg31Parameters::fields() : ['Jc', 'Jmin', 'Jmax', 'S1', 'S2', 'S3', 'S4', 'H1', 'H2', 'H3', 'H4', 'I1', 'I2', 'I3', 'I4', 'I5'];
+                foreach ($fields as $k) {
                     if (array_key_exists($k, $result) && $result[$k] !== '' && $result[$k] !== null) {
                         $flat[$k] = $result[$k];
                     }
@@ -369,6 +373,12 @@ class InstallProtocolManager
                 'secret' => $result['secret'] ?? null,
                 'server_host' => $result['server_host'] ?? null,
                 'container_name' => $result['container_name'] ?? ($metadata['container_name'] ?? null),
+                'runtime_commit' => $result['runtime_commit'] ?? null,
+                'tools_commit' => $result['tools_commit'] ?? null,
+                'image_id' => $result['image_id'] ?? null,
+                'dockerfile_sha' => $result['dockerfile_sha'] ?? null,
+                'engine_binary_sha' => $result['engine_binary_sha'] ?? null,
+                'tools_binary_sha' => $result['tools_binary_sha'] ?? null,
             ];
             if (($protocol['slug'] ?? '') === 'aivpn' && array_key_exists('connection_key', $result)) {
                 $extras['connection_key'] = $result['connection_key'];
@@ -417,12 +427,22 @@ class InstallProtocolManager
         // For multi-protocol servers, use container_name from protocol metadata first
         // (vpn_servers.container_name stores the primary protocol's container, e.g. 'aivpn-server')
         $containerName = $metadata['container_name'] ?? ($serverData['container_name'] ?? 'amnezia-awg');
+        $protocolId = self::resolveProtocolId($protocol);
+        if (($protocol['slug'] ?? '') === 'awg31' && $protocolId) {
+            $pdo = DB::conn();
+            $stored = $pdo->prepare('SELECT config_data FROM server_protocols WHERE server_id = ? AND protocol_id = ? LIMIT 1');
+            $stored->execute([$server->getId(), $protocolId]);
+            $config = json_decode((string) $stored->fetchColumn(), true) ?: [];
+            if (!empty($config['extras']['imported_native_runtime']) && !empty($config['extras']['container_name'])) {
+                $containerName = (string) $config['extras']['container_name'];
+            }
+        }
         $containerFilter = escapeshellarg('^' . $containerName . '$');
         $containerArg = escapeshellarg($containerName);
 
         // AWG2 uses awg0.conf (standard, same as native Amnezia app)
         // Old AWG uses wg0.conf
-        $isAwg2 = (stripos($containerName, 'awg2') !== false || ($protocol['slug'] ?? '') === 'awg2');
+        $isAwg2 = (stripos($containerName, 'awg2') !== false || stripos($containerName, 'awg31') !== false || in_array(($protocol['slug'] ?? ''), ['awg2', 'awg31'], true));
         $configDir = '/opt/amnezia/awg';
         $configFile = $isAwg2 ? 'awg0.conf' : 'wg0.conf';
 
@@ -527,7 +547,7 @@ class InstallProtocolManager
         $containerArg = escapeshellarg($containerName);
 
         // Config is always wg0.conf — container CMD runs: awg-quick up /opt/amnezia/awg/wg0.conf
-        $isAwg2 = (stripos($containerName, 'awg2') !== false || ($protocol['slug'] ?? '') === 'awg2');
+        $isAwg2 = (stripos($containerName, 'awg2') !== false || stripos($containerName, 'awg31') !== false || in_array(($protocol['slug'] ?? ''), ['awg2', 'awg31'], true));
         $configDir = '/opt/amnezia/awg';
         // AWG2: try awg0.conf first (standard), fall back to wg0.conf (legacy)
         $configFile = $isAwg2 ? 'awg0.conf' : 'wg0.conf';
@@ -541,8 +561,9 @@ class InstallProtocolManager
 
         // Try to ensure container is running and wg is up
         $server->executeCommand("docker start {$containerArg} 2>/dev/null || true", true);
-        $server->executeCommand("docker exec -i {$containerArg} wg-quick down {$configDir}/{$configFile} 2>/dev/null || true", true);
-        $server->executeCommand("docker exec -i {$containerArg} wg-quick up {$configDir}/{$configFile} 2>/dev/null || true", true);
+        $quick = $isAwg2 ? 'awg-quick' : 'wg-quick';
+        $server->executeCommand("docker exec -i {$containerArg} {$quick} down {$configDir}/{$configFile} 2>/dev/null || true", true);
+        $server->executeCommand("docker exec -i {$containerArg} {$quick} up {$configDir}/{$configFile} 2>/dev/null || true", true);
 
         $pdo = DB::conn();
         $serverData = $server->getData();
@@ -585,17 +606,22 @@ class InstallProtocolManager
         
         // Store protocol-specific config in server_protocols (works for both primary and secondary)
         if ($protocolId) {
+            $oldStmt = $pdo->prepare('SELECT config_data FROM server_protocols WHERE server_id = ? AND protocol_id = ? LIMIT 1');
+            $oldStmt->execute([$serverId, $protocolId]);
+            $oldConfig = json_decode((string) $oldStmt->fetchColumn(), true) ?: [];
+            $oldExtras = is_array($oldConfig['extras'] ?? null) ? $oldConfig['extras'] : [];
+            $newExtras = array_merge($oldExtras, [
+                'vpn_port' => $details['vpn_port'] ?? null,
+                'vpn_subnet' => $details['vpn_subnet'] ?? ($oldExtras['vpn_subnet'] ?? '10.8.1.0/24'),
+                'server_public_key' => $details['server_public_key'] ?? null,
+                'preshared_key' => $details['preshared_key'] ?? null,
+                'awg_params' => $details['awg_params'] ?? null,
+                'container_name' => $containerName,
+            ]);
             $configData = json_encode([
-                'server_host' => $serverData['ip_address'] ?? $serverData['hostname'] ?? null,
+                'server_host' => $serverData['host'] ?? ($oldConfig['server_host'] ?? null),
                 'server_port' => $details['vpn_port'] ?? null,
-                'extras' => [
-                    'vpn_port' => $details['vpn_port'] ?? null,
-                    'vpn_subnet' => $details['vpn_subnet'] ?? '10.8.1.0/24',
-                    'server_public_key' => $details['server_public_key'] ?? null,
-                    'preshared_key' => $details['preshared_key'] ?? null,
-                    'awg_params' => $details['awg_params'] ?? null,
-                    'container_name' => $containerName,
-                ],
+                'extras' => $newExtras,
             ]);
             $stmt = $pdo->prepare('
                 INSERT INTO server_protocols (server_id, protocol_id, config_data, applied_at, created_at)
@@ -859,7 +885,8 @@ class InstallProtocolManager
             }
         }
 
-        $wrapper = "bash <<'EOS'\nset -eo pipefail\n" . $exportLines . $script . "\nEOS";
+        $wrapper = "bash <<'EOS'\nset -eo pipefail\n" . $exportLines . $script
+            . "\nEOS\nscript_rc=\$?\nprintf '\\n__PANEL_SCRIPT_EXIT__=%s\\n' \"\$script_rc\"";
         Logger::appendInstall($server->getId(), strtoupper($phase) . ' phase: executing remote script');
         $output = $server->executeCommand($wrapper, true);
         Logger::appendInstall($server->getId(), strtoupper($phase) . ' phase: output size ' . strlen((string) $output) . ' bytes');
@@ -868,6 +895,17 @@ class InstallProtocolManager
             Logger::appendInstall($server->getId(), strtoupper($phase) . ' phase: output head ' . $head);
         }
         $trimmed = trim($output);
+        $scriptExit = null;
+        if (preg_match('/(?:^|\n)__PANEL_SCRIPT_EXIT__=(\d+)\s*$/', $trimmed, $exitMatch)) {
+            $scriptExit = (int) $exitMatch[1];
+            $trimmed = trim(preg_replace('/(?:^|\n)__PANEL_SCRIPT_EXIT__=\d+\s*$/', '', $trimmed));
+        }
+        if ($scriptExit !== null && $scriptExit !== 0) {
+            $flatOutput = str_replace(["\r", "\n"], ' ', $trimmed);
+            $safeHead = preg_replace('/[A-Za-z0-9+\/=]{30,}/', '[redacted]', substr($flatOutput, 0, 180));
+            $safeTail = preg_replace('/[A-Za-z0-9+\/=]{30,}/', '[redacted]', substr($flatOutput, -420));
+            throw new Exception('Remote protocol script failed (exit ' . $scriptExit . '): ' . $safeHead . ' ... ' . $safeTail);
+        }
         $installProbeSummary = '';
 
         if ($phase === 'install' && $trimmed === '') {
@@ -910,7 +948,12 @@ class InstallProtocolManager
         $result = self::parseKeyValueOutput($trimmed);
         if (!empty($result)) {
             Logger::appendInstall($server->getId(), strtoupper($phase) . ' phase: parsed key-value result with ' . count($result) . ' keys');
-            return array_merge(['success' => true], $result);
+            if (array_key_exists('success', $result)) {
+                $result['success'] = filter_var($result['success'], FILTER_VALIDATE_BOOLEAN);
+            } else {
+                $result['success'] = true;
+            }
+            return $result;
         }
 
         // Heuristic: treat obvious errors on install as failure to avoid false "active" status
@@ -1110,6 +1153,16 @@ class InstallProtocolManager
                     ? (int) $serverData['vpn_port']
                     : ''),
         ];
+        if (($context['protocol']['slug'] ?? '') === 'awg31') {
+            $settings = $options['settings'] ?? [];
+            if (!is_array($settings)) {
+                throw new InvalidArgumentException('AWG31 settings must be an object');
+            }
+            $settings = Awg31Parameters::normalize($settings);
+            foreach ($settings as $field => $value) {
+                $pairs['AWG31_' . strtoupper(preg_replace('/(?<!^)[A-Z]/', '_$0', $field))] = $value;
+            }
+        }
 
         // Check for saved Reality keys in server_protocols table
         $serverId = $serverData['id'] ?? null;
@@ -1206,7 +1259,7 @@ class InstallProtocolManager
     private static function parseWireGuardConfig(string $config): array
     {
         $lines = preg_split('/\r?\n/', $config);
-        $awgKeys = ['Jc', 'Jmin', 'Jmax', 'S1', 'S2', 'S3', 'S4', 'H1', 'H2', 'H3', 'H4', 'I1', 'I2', 'I3', 'I4', 'I5'];
+        $awgKeys = Awg31Parameters::fields();
         $awgParams = [];
         $listenPort = null;
 
@@ -1277,6 +1330,7 @@ class InstallProtocolManager
             'amnezia-wg'            => 'awg',
             'amnezia-wg-advanced'   => 'awg',
             'awg2'                  => 'awg',
+            'awg31'                 => 'awg',
         ];
 
         if (isset($slugMap[$slug])) {
@@ -1408,6 +1462,22 @@ class InstallProtocolManager
         $handler = self::resolveHandler($protocol);
         Logger::appendInstall($server->getId(), 'UNINSTALL: slug=' . $slug . ' handler=' . $handler);
 
+        if ($slug === 'awg31') {
+            $pid = self::resolveProtocolId($protocol);
+            if ($pid) {
+                $stmt = DB::conn()->prepare('SELECT config_data FROM server_protocols WHERE server_id = ? AND protocol_id = ? LIMIT 1');
+                $stmt->execute([$server->getId(), $pid]);
+                $binding = json_decode((string) $stmt->fetchColumn(), true) ?: [];
+                $extras = is_array($binding['extras'] ?? null) ? $binding['extras'] : [];
+                if (!empty($extras['imported_native_runtime'])) {
+                    throw new Exception('Imported native AWG31 runtime is not panel-owned; remove it through its native installation workflow');
+                }
+                if (($extras['container_name'] ?? 'amnezia-awg31') !== 'amnezia-awg31') {
+                    throw new Exception('Refusing AWG31 uninstall because the selected binding is not the panel-owned container');
+                }
+            }
+            return self::runScript($server, $protocol, 'uninstall', $options);
+        }
         switch ($handler) {
             case 'warp':
                 return self::uninstallBuiltinWarp($server, $protocol, $options);
@@ -1496,7 +1566,18 @@ class InstallProtocolManager
             $isAwg = $handler === 'awg';
             $isXray = $handler === 'xray';
 
-            if ($isAwg) {
+            $importedNativeAwg31 = false;
+            if ($slug === 'awg31') {
+                $pdo = DB::conn();
+                $pid = self::resolveProtocolId($protocol);
+                if ($pid) {
+                    $stored = $pdo->prepare('SELECT config_data FROM server_protocols WHERE server_id = ? AND protocol_id = ? LIMIT 1');
+                    $stored->execute([$serverId, $pid]);
+                    $storedConfig = json_decode((string) $stored->fetchColumn(), true) ?: [];
+                    $importedNativeAwg31 = !empty($storedConfig['extras']['imported_native_runtime']);
+                }
+            }
+            if ($isAwg && ($slug !== 'awg31' || $importedNativeAwg31)) {
                 $detection = self::detectBuiltinAwg($server, $protocol);
                 Logger::appendInstall($serverId, 'AWG detect result: status=' . ($detection['status'] ?? 'null') . ' message=' . ($detection['message'] ?? 'none'));
                 if (($detection['status'] ?? '') === 'existing') {
@@ -1504,23 +1585,6 @@ class InstallProtocolManager
                     $restoreResult = self::restoreBuiltinAwg($server, $protocol, $detection, $options);
                     // Import existing clients into DB
                     self::importExistingAwgClients($server, $protocol, $detection);
-                    $pdo = DB::conn();
-                    $pid = self::resolveProtocolId($protocol);
-                    if ($pid) {
-                        $details = $detection['details'] ?? [];
-                        $config = [
-                            'server_host' => $server->getData()['host'] ?? null,
-                            'server_port' => $details['vpn_port'] ?? null,
-                            'extras' => [
-                                'vpn_port' => $details['vpn_port'] ?? null,
-                                'server_public_key' => $details['server_public_key'] ?? null,
-                                'preshared_key' => $details['preshared_key'] ?? null,
-                                'awg_params' => $details['awg_params'] ?? null,
-                            ]
-                        ];
-                        $stmt2 = $pdo->prepare('INSERT INTO server_protocols (server_id, protocol_id, config_data, applied_at, created_at) VALUES (?, ?, ?, NOW(), NOW()) ON DUPLICATE KEY UPDATE config_data = VALUES(config_data), applied_at = NOW()');
-                        $stmt2->execute([$serverId, $pid, json_encode($config)]);
-                    }
                     return array_merge($restoreResult, ['mode' => 'restore_existing']);
                 }
             }
@@ -1556,7 +1620,8 @@ class InstallProtocolManager
                 // scripted install in that case so awg2 builds its own amnezia-awg2 container.
                 $metaContainer = trim((string) ($protocol['definition']['metadata']['container_name'] ?? ''));
                 $primaryContainer = trim((string) ($server->getData()['container_name'] ?? 'amnezia-awg'));
-                $useOwnScript = ($metaContainer !== '' && $metaContainer !== $primaryContainer && !empty($protocol['install_script']));
+                $useOwnScript = (($protocol['slug'] ?? '') === 'awg31' && !empty($protocol['install_script']))
+                    || ($metaContainer !== '' && $metaContainer !== $primaryContainer && !empty($protocol['install_script']));
                 if (!$useOwnScript) {
                 $res = $server->runAwgInstall($options);
                 Logger::appendInstall($serverId, 'Builtin AWG install finished');
@@ -1571,7 +1636,8 @@ class InstallProtocolManager
                 $resolvedAwgParams = $res['awg_params'] ?? null;
                 if (!is_array($resolvedAwgParams)) {
                     $candidate = [];
-                    foreach (['Jc', 'Jmin', 'Jmax', 'S1', 'S2', 'S3', 'S4', 'H1', 'H2', 'H3', 'H4', 'I1', 'I2', 'I3', 'I4', 'I5'] as $k) {
+                $fields = ($protocol['slug'] ?? '') === 'awg31' ? Awg31Parameters::fields() : ['Jc', 'Jmin', 'Jmax', 'S1', 'S2', 'S3', 'S4', 'H1', 'H2', 'H3', 'H4', 'I1', 'I2', 'I3', 'I4', 'I5'];
+                foreach ($fields as $k) {
                         if (array_key_exists($k, $res)) {
                             $candidate[$k] = $res[$k];
                         }
@@ -1708,21 +1774,46 @@ class InstallProtocolManager
                 }
             }
             Logger::appendInstall($serverId, 'Scripted install parsed port ' . ($port ?? 0) . ' password ' . ($password ?? ''));
+            $selectedAwgParams = [];
+            if (($protocol['slug'] ?? '') === 'awg31') {
+                $candidate = [];
+                foreach (Awg31Parameters::fields() as $field) {
+                    foreach ([$field, strtolower($field)] as $key) {
+                        if (array_key_exists($key, $res) && $res[$key] !== '') {
+                            $candidate[$field] = $res[$key];
+                            break;
+                        }
+                    }
+                }
+                if ($candidate) $selectedAwgParams = Awg31Parameters::normalize($candidate);
+            }
+            $selectedExtras = [
+                'password' => $password,
+                'client_id' => $clientId,
+                'container_name' => $res['container_name'] ?? ($protocol['definition']['metadata']['container_name'] ?? null),
+                'vpn_port' => $port,
+                'server_public_key' => $res['server_public_key'] ?? null,
+                'preshared_key' => $res['preshared_key'] ?? null,
+                'awg_params' => $selectedAwgParams ?: null,
+                'runtime_commit' => $res['runtime_commit'] ?? null,
+                'tools_commit' => $res['tools_commit'] ?? null,
+                'image_id' => $res['image_id'] ?? null,
+                'dockerfile_sha' => $res['dockerfile_sha'] ?? null,
+                'engine_binary_sha' => $res['engine_binary_sha'] ?? null,
+                'tools_binary_sha' => $res['tools_binary_sha'] ?? null,
+                'result' => $res,
+                'reality_public_key' => $res['reality_public_key'] ?? null,
+                'reality_private_key' => $res['reality_private_key'] ?? null,
+                'reality_short_id' => $res['reality_short_id'] ?? null,
+                'reality_server_name' => $res['reality_server_name'] ?? null,
+            ];
             $pdo = DB::conn();
             $pid = self::resolveProtocolId($protocol);
             if ($pid) {
                 $config = [
                     'server_host' => $server->getData()['host'] ?? null,
                     'server_port' => $port,
-                    'extras' => [
-                        'password' => $password,
-                        'client_id' => $clientId,
-                        'result' => $res,
-                        'reality_public_key' => $res['reality_public_key'] ?? null,
-                        'reality_private_key' => $res['reality_private_key'] ?? null,
-                        'reality_short_id' => $res['reality_short_id'] ?? null,
-                        'reality_server_name' => $res['reality_server_name'] ?? null,
-                    ]
+                    'extras' => $selectedExtras
                 ];
                 $stmt2 = $pdo->prepare('INSERT INTO server_protocols (server_id, protocol_id, config_data, applied_at, created_at) VALUES (?, ?, ?, NOW(), NOW()) ON DUPLICATE KEY UPDATE config_data = VALUES(config_data), applied_at = NOW()');
                 $stmt2->execute([$serverId, $pid, json_encode($config)]);
@@ -1734,7 +1825,7 @@ class InstallProtocolManager
                 $currentSlug = $protocol['slug'] ?? '';
                 $isFirstProtocol = ($existingProtocol === '' || $existingProtocol === $currentSlug);
                 if ($isFirstProtocol) {
-                    self::markServerActive($serverId, null, ['vpn_port' => $port]);
+                    self::markServerActive($serverId, null, $selectedExtras);
                 }
             }
 
@@ -2258,7 +2349,7 @@ class InstallProtocolManager
         $metadata = $protocol['definition']['metadata'] ?? [];
         $containerName = $metadata['container_name'] ?? $serverData['container_name'] ?? 'amnezia-awg';
         // AWG2: try awg0.conf first (standard), fall back to wg0.conf (legacy)
-        $isAwg2 = (stripos($containerName, 'awg2') !== false || ($protocol['slug'] ?? '') === 'awg2');
+        $isAwg2 = (stripos($containerName, 'awg2') !== false || stripos($containerName, 'awg31') !== false || in_array(($protocol['slug'] ?? ''), ['awg2', 'awg31'], true));
         $configDir = '/opt/amnezia/awg';
         $configFile = $isAwg2 ? 'awg0.conf' : 'wg0.conf';
         $conf = $server->executeCommand("docker exec -i $containerName cat {$configDir}/{$configFile}", true);
@@ -2616,7 +2707,7 @@ class InstallProtocolManager
         $pid = self::resolveProtocolId($protocol);
 
         // AWG2: try awg0.conf first (standard), fall back to wg0.conf (legacy)
-        $isAwg2 = (stripos($containerName, 'awg2') !== false || ($protocol['slug'] ?? '') === 'awg2');
+        $isAwg2 = (stripos($containerName, 'awg2') !== false || stripos($containerName, 'awg31') !== false || in_array(($protocol['slug'] ?? ''), ['awg2', 'awg31'], true));
         $configDir = '/opt/amnezia/awg';
         $configFile = $isAwg2 ? 'awg0.conf' : 'wg0.conf';
         $wgConfig = $server->executeCommand("docker exec -i {$containerArg} cat {$configDir}/{$configFile} 2>/dev/null", true);

@@ -6,6 +6,7 @@ use Endroid\QrCode\ErrorCorrectionLevel;
 use Endroid\QrCode\Label\Label;
 use Endroid\QrCode\Label\LabelAlignment;
 use Endroid\QrCode\Encoding\Encoding;
+require_once __DIR__ . '/Awg31Parameters.php';
 
 class QrUtil
 {
@@ -78,7 +79,7 @@ class QrUtil
     {
         // For AWG2, use simple format: header + plain config text (like real Amnezia app)
         // For other protocols, use the old JSON+compression format for backward compatibility
-        if ($protocolSlug === 'awg2') {
+        if (in_array($protocolSlug, ['awg2', 'awg31'], true)) {
             return self::encodeSimpleConf($confText);
         }
         
@@ -93,8 +94,8 @@ class QrUtil
      */
     public static function encodeVpnUrlPayload(string $confText, string $protocolSlug = ''): string
     {
-        if ($protocolSlug === 'awg2') {
-            return self::encodeVpnUrlConf($confText);
+        if (in_array($protocolSlug, ['awg2', 'awg31'], true)) {
+            return 'vpn://' . self::encodeVpnUrlConf($confText, $protocolSlug);
         }
         
         // For other protocols, use old format with vpn:// prefix
@@ -258,7 +259,7 @@ class QrUtil
                 $allowedIps = array_map('trim', preg_split('/[,\s]+/', $v));
             } elseif (stripos($line, 'PersistentKeepalive') === 0 && strpos($line, '=') !== false) {
                 [, $v] = array_map('trim', explode('=', $line, 2));
-                $keepAlive = (int) $v;
+                $keepAlive = $v;
             }
         }
 
@@ -303,6 +304,11 @@ class QrUtil
             'S3' => null,
             'S4' => null,
         ];
+        if ($protocolSlug === 'awg31') {
+            foreach (Awg31Parameters::fields() as $field) {
+                $params[$field] = null;
+            }
+        }
         foreach (explode("\n", $conf) as $line) {
             $line = trim($line);
             foreach (array_keys($params) as $k) {
@@ -344,6 +350,13 @@ class QrUtil
             'psk_key' => (string) ($psk ?? ''),
             'server_pub_key' => (string) ($pubKeyServer ?? ''),
         ];
+        if ($protocolSlug === 'awg31') {
+            foreach (Awg31Parameters::fields() as $field) {
+                if (array_key_exists($field, $params) && $params[$field] !== null && $params[$field] !== '') {
+                    $lastConfigObj[$field] = (string) $params[$field];
+                }
+            }
+        }
 
         $serverDesc = self::resolveServerDescription($endpointHost);
 
@@ -418,7 +431,7 @@ class QrUtil
                 $allowedIps = array_map('trim', preg_split('/[,\s]+/', $v));
             } elseif (stripos($line, 'PersistentKeepalive') === 0 && strpos($line, '=') !== false) {
                 [, $v] = array_map('trim', explode('=', $line, 2));
-                $keepAlive = (int) $v;
+                $keepAlive = $v;
             }
         }
 
@@ -463,6 +476,11 @@ class QrUtil
             'S3' => null,
             'S4' => null,
         ];
+        if ($protocolSlug === 'awg31') {
+            foreach (Awg31Parameters::fields() as $field) {
+                $params[$field] = null;
+            }
+        }
         foreach (explode("\n", $conf) as $line) {
             $line = trim($line);
             foreach (array_keys($params) as $k) {
@@ -504,6 +522,13 @@ class QrUtil
             'psk_key' => (string) ($psk ?? ''),
             'server_pub_key' => (string) ($pubKeyServer ?? ''),
         ];
+        if ($protocolSlug === 'awg31') {
+            foreach (Awg31Parameters::fields() as $field) {
+                if (array_key_exists($field, $params) && $params[$field] !== null && $params[$field] !== '') {
+                    $lastConfigObj[$field] = (string) $params[$field];
+                }
+            }
+        }
 
         $serverDesc = self::resolveServerDescription($endpointHost);
 
@@ -535,7 +560,10 @@ class QrUtil
                         'S4' => (string) ($params['S4'] ?? ''),
                         'protocol_version' => '2',
                         'subnet_address' => (string) ($address ? (preg_match('/^(\d+\.\d+\.\d+)\.\d+/', $address, $m) ? $m[1] . '.0' : '10.8.1.0') : '10.8.1.0'),
-                    ] : []),
+                    ] : ($protocolSlug === 'awg31' ? array_merge(
+                        array_filter(array_map(static fn($v) => $v === null ? null : (string) $v, $params), static fn($v) => $v !== null),
+                        ['protocol_version' => '3.1']
+                    ) : [])),
                     'container' => $protocolSlug === 'awg2' ? 'amnezia-awg2' : 'amnezia-awg',
                 ],
             ],
@@ -545,6 +573,20 @@ class QrUtil
             'dns2' => $dns2,
             'hostName' => $endpointHost,
         ];
+        if ($protocolSlug === 'awg31') {
+            foreach (Awg31Parameters::fields() as $field) {
+                if (($envelope['containers'][0]['awg'][$field] ?? null) === '') {
+                    unset($envelope['containers'][0]['awg'][$field]);
+                }
+                if (($lastConfigObj[$field] ?? null) === '') {
+                    unset($lastConfigObj[$field]);
+                }
+            }
+            $envelope['containers'][0]['awg']['last_config'] = json_encode(
+                $lastConfigObj,
+                JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT
+            );
+        }
         return $envelope;
     }
 

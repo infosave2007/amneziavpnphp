@@ -1,4 +1,5 @@
 <?php
+require_once __DIR__ . '/Awg31Parameters.php';
 /**
  * Backup library utilities for importing servers from backup files.
  */
@@ -316,7 +317,13 @@ class BackupParser {
         foreach ($serversRaw as $serverIndex => $serverEntry) {
             $containers = $serverEntry['containers'] ?? [];
             foreach ($containers as $container) {
-                if (($container['container'] ?? '') !== 'amnezia-awg') {
+                $containerMarker = (string) ($container['container'] ?? '');
+                if ($containerMarker !== 'amnezia-awg') {
+                    $foreignAwg = is_array($container['awg'] ?? null) ? $container['awg'] : [];
+                    $foreignVersion = trim((string) ($foreignAwg['protocol_version'] ?? ''));
+                    if ($foreignVersion !== '') {
+                        throw new Exception('Contradictory AmneziaWG container/protocol_version: ' . $containerMarker . '/' . $foreignVersion);
+                    }
                     continue;
                 }
 
@@ -324,6 +331,11 @@ class BackupParser {
                 if (empty($awg)) {
                     continue;
                 }
+                $protocolVersion = array_key_exists('protocol_version', $awg) ? trim((string) $awg['protocol_version']) : '';
+                if ($protocolVersion !== '' && $protocolVersion !== '3.1' && $protocolVersion !== '2') {
+                    throw new Exception('Unsupported AmneziaWG protocol_version: ' . $protocolVersion);
+                }
+                $protocolSlug = $protocolVersion === '3.1' ? 'awg31' : ($protocolVersion === '2' ? 'awg2' : 'amnezia-wg-advanced');
 
                 $host = $serverEntry['hostName'] ?? ($awg['hostName'] ?? null);
                 if (!$host) {
@@ -331,10 +343,14 @@ class BackupParser {
                 }
 
                 $awgParams = [];
-                foreach (['Jc', 'Jmin', 'Jmax', 'S1', 'S2', 'H1', 'H2', 'H3', 'H4'] as $key) {
-                    if (isset($awg[$key])) {
+                $paramFields = $protocolSlug === 'awg31' ? Awg31Parameters::fields() : ['Jc', 'Jmin', 'Jmax', 'S1', 'S2', 'S3', 'S4', 'H1', 'H2', 'H3', 'H4', 'I1', 'I2', 'I3', 'I4', 'I5'];
+                foreach ($paramFields as $key) {
+                    if (array_key_exists($key, $awg)) {
                         $awgParams[$key] = is_numeric($awg[$key]) ? (int)$awg[$key] : $awg[$key];
                     }
+                }
+                if ($protocolSlug === 'awg31') {
+                    $awgParams = Awg31Parameters::normalize($awgParams);
                 }
 
                 $vpnPort = isset($awg['port']) ? (int)$awg['port'] : null;
@@ -367,6 +383,7 @@ class BackupParser {
                             'config' => $lastConfig['config'] ?? '',
                             'status' => 'active',
                             'expires_at' => null,
+                            'protocol_slug' => $protocolSlug,
                         ];
                     }
                 }
@@ -390,6 +407,22 @@ class BackupParser {
                     'server_public_key' => $awg['server_pub_key'] ?? null,
                     'preshared_key' => $awg['psk_key'] ?? null,
                     'awg_params' => $awgParams,
+                    'install_protocol' => $protocolSlug,
+                    'server_protocols' => [[
+                        'slug' => $protocolSlug,
+                        'config_data' => [
+                            'server_host' => $host,
+                            'server_port' => $vpnPort,
+                            'extras' => [
+                                'container_name' => $containerMarker,
+                                'vpn_port' => $vpnPort,
+                                'server_public_key' => $awg['server_pub_key'] ?? null,
+                                'preshared_key' => $awg['psk_key'] ?? null,
+                                'awg_params' => $awgParams,
+                                'imported_native_runtime' => true,
+                            ],
+                        ],
+                    ]],
                     'clients' => $clients,
                 ];
             }
@@ -434,11 +467,15 @@ class BackupParser {
                 'client_ip' => $client['client_ip'] ?? null,
                 'public_key' => $client['public_key'] ?? '',
                 'private_key' => $client['private_key'] ?? '',
-                'preshared_key' => $client['preshared_key'] ?? ($server['preshared_key'] ?? ''),
+                // Preserve absence: a secondary protocol binding, not the primary
+                // server row, supplies the fallback PSK during destination import.
+                'preshared_key' => array_key_exists('preshared_key', $client) ? ($client['preshared_key'] ?? '') : '',
                 'config' => $client['config'] ?? '',
                 'status' => $client['status'] ?? 'active',
                 'expires_at' => $client['expires_at'] ?? null,
                 'created_at' => $client['created_at'] ?? null,
+                'protocol_id' => $client['protocol_id'] ?? null,
+                'protocol_slug' => $client['protocol_slug'] ?? null,
             ];
         }
 
@@ -458,6 +495,8 @@ class BackupParser {
                     'server_public_key' => $server['server_public_key'] ?? null,
                     'preshared_key' => $server['preshared_key'] ?? null,
                     'awg_params' => $awgParams,
+                    'install_protocol' => $server['install_protocol'] ?? '',
+                    'server_protocols' => is_array($decoded['server_protocols'] ?? null) ? $decoded['server_protocols'] : [],
                     'clients' => $clients,
                 ]
             ],
