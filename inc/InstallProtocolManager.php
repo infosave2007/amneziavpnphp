@@ -1242,7 +1242,7 @@ class InstallProtocolManager
 
     private static function renderTemplate(string $template, array $context): string
     {
-        return preg_replace_callback('/{{\s*([a-zA-Z0-9_.]+)\s*}}/', function ($matches) use ($context) {
+        return preg_replace_callback('/{{\s*([a-zA-Z_][a-zA-Z0-9_.]*)\s*}}/', function ($matches) use ($context) {
             $path = explode('.', $matches[1]);
             $value = $context;
             foreach ($path as $segment) {
